@@ -88,15 +88,25 @@ agent learns to survive longer.
 ## Results on the simulated game
 
 Two 150k-step PPO runs (identical seed, 84×84 frames + mel spectrogram,
-~170 env steps/s on CPU), differing only in whether rewards were normalised:
+~250 env steps/s on four CPU cores), differing only in whether rewards were
+normalised:
 
 | | survival at 10k steps | at 150k steps | eval over 20 episodes |
 | --- | --- | --- | --- |
-| raw rewards (`--no-reward-norm`) | 19.6 steps | 22.0 steps | 19.2 steps, 0.2 points |
-| normalised rewards (default) | 20.2 steps | 41.2 steps | 42.5 steps, 2.5 points |
+| raw rewards (`--no-reward-norm`) | 18.8 steps | 23.3 steps | 20.6 steps, 0.8 points |
+| normalised rewards (default) | 19.9 steps | 51.6 steps | 51.3 steps, 5.6 points |
 
-Both runs are flat for the first ~50k steps and then diverge sharply, which is
-what the reward-scale argument below predicts. Neither agent has mastered the
+Reproduce with:
+
+```bash
+python train.py --mock --timesteps 150000 --run-name ab-norm --seed 0
+python train.py --mock --timesteps 150000 --run-name ab-raw --seed 0 --no-reward-norm
+python play.py models/ab-norm/final.zip --mock --episodes 20
+```
+
+Both runs are flat for the first ~40k steps and then diverge sharply, which is
+what the reward-scale argument below predicts. The better agent weaves between
+lanes and finishes episodes with a positive return; it has not mastered the
 game — pixel-based control needs millions of steps for that, and the simulator
 exists to validate the pipeline rather than to serve as a benchmark — but the
 plumbing clearly produces a learning signal the policy can exploit.
@@ -201,7 +211,7 @@ reward = step_reward                    # +0.1 survival drip, dense signal
 - `reward.game_over_penalty` vs `reward.step_reward` — if the agent suicides
   early, the penalty is too small relative to the drip it is forfeiting.
 - `train.normalize_reward` — on by default for PPO, and the single biggest
-  difference measured so far (see the table above: 42.5 versus 19.2 steps of
+  difference measured so far (see the table above: 51.3 versus 20.6 steps of
   survival). The reward weights are hand-picked magnitudes (+0.1 against −100)
   and PPO shares one feature extractor between actor and critic, so raw
   rewards produce a value loss in the tens against a policy gradient in the
