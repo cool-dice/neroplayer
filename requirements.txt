@@ -1,0 +1,26 @@
+# Core reinforcement learning stack
+gymnasium>=0.29,<2.0
+stable-baselines3>=2.3,<3.0
+torch>=2.2
+tensorboard>=2.16
+
+# Numerics
+numpy>=1.26,<3.0
+
+# Vision: screen capture + image processing
+mss>=9.0
+# opencv-python ships GUI bindings (needed by calibrate.py on the game machine);
+# headless boxes/CI cannot load libGL, so they get the headless wheel instead.
+opencv-python>=4.9; sys_platform == "win32"
+opencv-python-headless>=4.9; sys_platform != "win32"
+
+# Audio: system loopback capture + spectrogram features
+soundcard>=0.4.3
+librosa>=0.10
+
+# Optional score OCR. Requires the Tesseract binary on PATH; the observer
+# silently falls back to a pixel-signature score detector when it is missing.
+pytesseract>=0.3.10
+
+# OS-level input injection. Windows only (uses the Win32 SendInput API).
+pydirectinput>=1.0.4; sys_platform == "win32"

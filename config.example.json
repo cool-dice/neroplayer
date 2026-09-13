@@ -1,0 +1,101 @@
+{
+  "capture": {
+    "region": {
+      "left": 100,
+      "top": 120,
+      "width": 800,
+      "height": 600
+    },
+    "monitor_index": 1
+  },
+  "vision": {
+    "width": 84,
+    "height": 84,
+    "grayscale": true,
+    "frame_stack": 4
+  },
+  "audio": {
+    "enabled": true,
+    "sample_rate": 16000,
+    "window_seconds": 0.5,
+    "n_mels": 32,
+    "n_fft": 512,
+    "hop_length": 256,
+    "block_size": 1024,
+    "top_db": 80.0
+  },
+  "control": {
+    "action_keys": [
+      "up",
+      "down",
+      null
+    ],
+    "restart_keys": [
+      "space"
+    ],
+    "tap_duration": 0.02,
+    "hold_keys": false,
+    "pause_between_calls": 0.0,
+    "fail_safe": false
+  },
+  "reward": {
+    "step_reward": 0.1,
+    "score_reward": 10.0,
+    "game_over_penalty": -100.0,
+    "max_score_delta": 50,
+    "game_over_region": {
+      "left": 250,
+      "top": 230,
+      "width": 300,
+      "height": 120
+    },
+    "game_over_template": "assets/game_over.png",
+    "template_threshold": 0.85,
+    "game_over_color_bgr": [
+      32,
+      32,
+      160
+    ],
+    "color_tolerance": 45.0,
+    "detection_patience": 2,
+    "score_region": {
+      "left": 600,
+      "top": 20,
+      "width": 180,
+      "height": 44
+    },
+    "score_mode": "auto",
+    "score_threshold": 140,
+    "pixel_change_ratio": 0.02
+  },
+  "env": {
+    "target_fps": 10.0,
+    "max_episode_steps": 3000,
+    "reset_delay": 1.0,
+    "reset_timeout": 10.0,
+    "warmup_frames": 2
+  },
+  "train": {
+    "algo": "ppo",
+    "total_timesteps": 200000,
+    "learning_rate": 0.00025,
+    "n_steps": 512,
+    "batch_size": 64,
+    "n_epochs": 4,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "ent_coef": 0.01,
+    "vf_coef": 0.5,
+    "max_grad_norm": 0.5,
+    "buffer_size": 50000,
+    "learning_starts": 1000,
+    "train_freq": 4,
+    "target_update_interval": 1000,
+    "exploration_fraction": 0.2,
+    "features_dim": 512,
+    "checkpoint_every": 10000,
+    "seed": null,
+    "device": "auto"
+  }
+}

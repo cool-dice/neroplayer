@@ -1,0 +1,109 @@
+"""End-to-end checks: the policy network and the training entry point.
+
+These run a handful of real gradient steps against the simulated game, which is
+what catches shape/dtype mismatches between the Dict observation space and the
+multi-modal extractor.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import torch
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv
+
+import train as train_script
+from ai_player.environment import make_env
+from ai_player.policies import MultiModalExtractor
+
+
+def test_extractor_fuses_both_modalities():
+    env = make_env(mock=True, seed=0)
+    try:
+        extractor = MultiModalExtractor(env.observation_space, features_dim=64)
+        obs, _ = env.reset()
+        batch = {key: torch.as_tensor(value[None, ...]) for key, value in obs.items()}
+        features = extractor(batch)
+    finally:
+        env.close()
+
+    assert features.shape == (1, 64)
+    assert torch.isfinite(features).all()
+    assert extractor.audio_net is not None
+
+
+def test_extractor_works_without_audio():
+    from ai_player.config import AppConfig
+
+    config = AppConfig()
+    config.audio.enabled = False
+    env = make_env(config, mock=True, seed=0)
+    try:
+        extractor = MultiModalExtractor(env.observation_space, features_dim=32)
+        obs, _ = env.reset()
+        features = extractor({"frames": torch.as_tensor(obs["frames"][None, ...])})
+    finally:
+        env.close()
+
+    assert extractor.audio_net is None
+    assert features.shape == (1, 32)
+
+
+def test_ppo_learns_for_a_few_steps():
+    config_env = make_env(mock=True, seed=1)
+    vec_env = DummyVecEnv([lambda: Monitor(config_env)])
+    args = train_script.parse_args(["--mock", "--timesteps", "64"])
+    config = train_script.build_config(args)
+    config.train.n_steps = 32
+    config.train.batch_size = 16
+    config.train.features_dim = 64
+
+    model = train_script.build_model(config, vec_env, tensorboard_log=None)
+    model.learn(total_timesteps=64)
+    action, _ = model.predict(vec_env.reset(), deterministic=True)
+
+    assert model.num_timesteps >= 64
+    assert vec_env.action_space.contains(int(np.asarray(action).reshape(-1)[0]))
+    vec_env.close()
+
+
+def test_dqn_builds_on_the_dict_observation_space():
+    env = make_env(mock=True, seed=2)
+    vec_env = DummyVecEnv([lambda: Monitor(env)])
+    args = train_script.parse_args(["--mock", "--algo", "dqn", "--timesteps", "32"])
+    config = train_script.build_config(args)
+    config.train.buffer_size = 256
+    config.train.learning_starts = 8
+    config.train.batch_size = 8
+    config.train.features_dim = 32
+
+    model = train_script.build_model(config, vec_env, tensorboard_log=None)
+    model.learn(total_timesteps=32)
+
+    assert model.num_timesteps >= 32
+    vec_env.close()
+
+
+def test_cli_overrides_reach_the_config():
+    args = train_script.parse_args(
+        ["--mock", "--algo", "dqn", "--timesteps", "1234", "--fps", "20", "--no-audio", "--seed", "5"]
+    )
+
+    config = train_script.build_config(args)
+
+    assert config.train.algo == "dqn"
+    assert config.train.total_timesteps == 1234
+    assert config.env.target_fps == 20
+    assert config.audio.enabled is False
+    assert config.train.seed == 5
+
+
+def test_main_runs_a_tiny_training_loop(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_script, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(train_script, "LOGS_DIR", tmp_path / "logs")
+
+    status = train_script.main(["--mock", "--timesteps", "48", "--run-name", "smoke", "--no-audio"])
+
+    assert status == 0
+    assert (tmp_path / "models" / "smoke" / "final.zip").exists()
+    assert (tmp_path / "models" / "smoke" / "config.json").exists()
