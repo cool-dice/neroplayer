@@ -47,6 +47,11 @@ python train.py --mock --timesteps 20000      # trains against the simulator
 | `train.py` / `play.py` / `calibrate.py` | Training loop, evaluation/recording, and region calibration (pick / check / live preview). |
 | `assets/templates/` | Where the game-over template crop lives. |
 
+The library modules sit in the `ai_player/` package rather than at the repo
+root, so that generic names like `config` and `controls` cannot shadow
+unrelated top-level modules on `sys.path`. Only the entry-point scripts
+(`train.py`, `play.py`, `calibrate.py`) live at the root.
+
 ## Install
 
 Python 3.10+.

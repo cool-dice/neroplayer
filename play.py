@@ -132,9 +132,7 @@ def main(argv: list[str] | None = None) -> int:
             returns.append(total)
             lengths.append(steps)
             points.append(float(info.get("episode_points", 0.0)))
-            print(
-                f"episode {episode}: return={total:8.2f}  steps={steps:5d}  points={points[-1]:.0f}"
-            )
+            print(f"episode {episode}: return={total:8.2f}  steps={steps:5d}  points={points[-1]:.0f}")
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:

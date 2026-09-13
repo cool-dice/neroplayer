@@ -232,9 +232,7 @@ class MockArcadeGame:
             chunk += 0.4 * envelope * np.sin(2 * np.pi * 880.0 * t).astype(np.float32)
         if "crash" in recent:
             chunk += 0.5 * self._rng.standard_normal(n).astype(np.float32)
-        self._audio = np.concatenate([self._audio, np.clip(chunk, -1.0, 1.0)])[
-            -self._sample_rate :
-        ]
+        self._audio = np.concatenate([self._audio, np.clip(chunk, -1.0, 1.0)])[-self._sample_rate :]
         self._events = [(name, tick) for name, tick in self._events if tick >= self.ticks - 2]
 
     def audio_window(self, n_samples: int) -> np.ndarray:
@@ -347,9 +345,7 @@ def _demo(path: str = "mock_game_demo.mp4", n_frames: int = 300) -> None:
     game, frames, audio, controller = build_mock_backends(config, seed=0)
     features = AudioFeatureExtractor(config.audio)
     rng = np.random.default_rng(0)
-    writer = cv2.VideoWriter(
-        path, cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (game.width, game.height)
-    )
+    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (game.width, game.height))
     for _ in range(n_frames):
         controller.act(int(rng.integers(0, config.control.n_actions)))
         frame = frames.grab()
