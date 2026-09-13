@@ -78,6 +78,43 @@ def test_pixel_score_signal_fires_only_when_the_box_changes(reward):
     assert points == 1.0
 
 
+def test_pixel_score_signal_catches_single_digit_increments(reward):
+    """A 5 -> 6 repaint moves few box pixels but much of the glyph ink."""
+    signal = PixelChangeScoreSignal(reward)
+    game = MockArcadeGame(seed=4)
+    game.score = 5
+    signal.update(game.render())
+
+    game.score = 6
+    points, _ = signal.update(game.render())
+
+    assert points == 1.0
+
+
+def test_pixel_score_signal_fires_once_per_scoring_frame(reward):
+    """No missed frames and no phantom points against the game's own counter."""
+    signal = PixelChangeScoreSignal(reward)
+    game = MockArcadeGame(seed=5)
+    # Ignore collisions: this measures the detector, not a dodging policy.
+    game._check_collision = lambda: None
+    signal.update(game.render())
+
+    scoring_frames = detections = mismatches = 0
+    previous = game.score
+    for _ in range(150):
+        game.tick()
+        points, _ = signal.update(game.render())
+        scored = game.score > previous
+        previous = game.score
+        scoring_frames += int(scored)
+        detections += int(points)
+        mismatches += int(bool(points) != scored)
+
+    assert scoring_frames > 0
+    assert detections == scoring_frames
+    assert mismatches == 0
+
+
 def test_build_score_signal_rejects_unknown_mode(reward):
     reward.score_mode = "telepathy"
 

@@ -195,14 +195,18 @@ class OcrScoreSignal:
 class PixelChangeScoreSignal:
     """Dependency-free score detector: reward *any* change in the score box.
 
-    We cannot know how many points were awarded, so each detected change counts
+    We cannot know how many points were awarded, so each changed frame counts
     as one point. That is enough for the policy gradient -- the agent only needs
-    the event to be correlated with good behaviour.
+    the event to be correlated with good behaviour -- but it does undercount
+    when a game awards several points in the same frame. Install Tesseract if
+    the exact delta matters.
     """
 
     def __init__(self, reward: RewardConfig) -> None:
         self._reward = reward
         self._last_mask: np.ndarray | None = None
+        # "ink" compares against the glyph area, "box" against the whole crop.
+        self._denominator = "ink"
 
     def reset(self) -> None:
         self._last_mask = None
@@ -212,8 +216,17 @@ class PixelChangeScoreSignal:
         previous, self._last_mask = self._last_mask, mask
         if previous is None or previous.shape != mask.shape or mask.size <= 1:
             return 0.0, None
-        changed_ratio = float(np.count_nonzero(previous != mask)) / mask.size
-        points = 1.0 if changed_ratio >= self._reward.pixel_change_ratio else 0.0
+        changed = float(np.count_nonzero(previous != mask))
+        # Measuring change against the digits rather than the whole crop keeps
+        # the threshold meaningful: in a generously sized score box, a 5 -> 6
+        # repaint moves well under 1% of the pixels but a large share of the
+        # ink, so a box-relative threshold silently drops most increments.
+        if self._denominator == "ink":
+            area = float(np.count_nonzero(previous | mask))
+        else:
+            area = float(mask.size)
+        ratio = changed / max(area, 1.0)
+        points = 1.0 if ratio >= self._reward.pixel_change_ratio else 0.0
         return points, None
 
 

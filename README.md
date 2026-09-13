@@ -175,11 +175,14 @@ reward = step_reward                    # +0.1 survival drip, dense signal
 - **Survival drip** gives PPO a gradient before it has ever scored. Without it
   the reward is sparse enough that early learning stalls.
 - **Score detection** prefers OCR (`--psm 7`, digits whitelisted) because it
-  yields a real delta. The fallback reads the score box as a binary mask and
-  rewards *changes* to it — no digits recognised, but the event is still
-  correlated with scoring, which is all the policy gradient needs. Implausible
-  OCR jumps (`7 → 771`) and counter resets are ignored rather than rewarded or
-  punished.
+  yields a real delta. Implausible jumps (`7 → 771`) and counter resets are
+  ignored rather than rewarded or punished. The fallback thresholds the score
+  box and rewards *changes* to it: no digits recognised, but the event is
+  still correlated with scoring, which is all the policy gradient needs. It is
+  measured against the glyph pixels rather than the whole crop — a `5 → 6`
+  repaint moves under 1% of a generous score box but a large share of its ink,
+  and a box-relative threshold drops most increments. It still undercounts
+  when a game awards several points in one frame, which is what OCR is for.
 - **Termination** is debounced over `detection_patience` consecutive frames.
   A one-frame false positive would end the episode and poison the return, so
   this matters more than it looks.

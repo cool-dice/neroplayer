@@ -174,8 +174,12 @@ class RewardConfig:
     score_mode: str = "auto"
     # Binarisation cut-off for both the OCR and the pixel-signature readers.
     score_threshold: int = 140
-    # Fraction of score-box pixels that must change to count as a new point.
-    pixel_change_ratio: float = 0.02
+    # Fraction of the score box's *ink* (thresholded glyph) pixels that must
+    # change for the pixel detector to count one point. Measured against the
+    # glyphs rather than the whole crop, so the value does not depend on how
+    # generously the score box was drawn. Anything from ~0.01 to ~0.1 behaves
+    # identically on the bundled game.
+    pixel_change_ratio: float = 0.05
 
 
 @dataclass
