@@ -253,9 +253,7 @@ class LoopbackAudioCapture:
             return
         self._resolve_microphone()  # fail fast, on the caller's thread
         self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._record_loop, name="loopback-audio", daemon=True
-        )
+        self._thread = threading.Thread(target=self._record_loop, name="loopback-audio", daemon=True)
         self._thread.start()
 
     def _resolve_microphone(self):

@@ -235,8 +235,7 @@ def build_score_signal(reward: RewardConfig) -> ScoreSignal:
         except Exception as exc:
             if mode == "ocr":
                 raise RuntimeError(
-                    "score_mode='ocr' requires pytesseract and the Tesseract "
-                    f"binary on PATH: {exc}"
+                    f"score_mode='ocr' requires pytesseract and the Tesseract binary on PATH: {exc}"
                 ) from exc
             warnings.warn(
                 f"Tesseract unavailable ({exc}); using the pixel-change score detector.",

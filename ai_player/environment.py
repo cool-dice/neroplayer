@@ -84,9 +84,7 @@ class GameEnv(gym.Env):
         self._audio_enabled = self.config.audio.enabled
 
         obs_spaces: dict[str, spaces.Space] = {
-            "frames": spaces.Box(
-                low=0, high=255, shape=self.config.vision.observation_shape, dtype=np.uint8
-            )
+            "frames": spaces.Box(low=0, high=255, shape=self.config.vision.observation_shape, dtype=np.uint8)
         }
         if self._audio_enabled:
             obs_spaces["audio"] = spaces.Box(
@@ -147,9 +145,7 @@ class GameEnv(gym.Env):
         info = {"episode_index": self._episode_index}
         return self._observation(), info
 
-    def step(
-        self, action: int
-    ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+    def step(self, action: int) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
         self._controller.act(int(action))
         frame = self._capture_frame()
         self._last_frame = frame

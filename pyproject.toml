@@ -27,6 +27,7 @@ ignore = [
 "tests/*" = ["SLF001"]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q"
 filterwarnings = ["ignore::RuntimeWarning"]

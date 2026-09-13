@@ -155,9 +155,7 @@ class RewardConfig:
 
     # --- Game-over detection -------------------------------------------------
     # Region (relative to the capture region) inspected for the game-over cue.
-    game_over_region: Region = field(
-        default_factory=lambda: Region(left=200, top=200, width=400, height=200)
-    )
+    game_over_region: Region = field(default_factory=lambda: Region(left=200, top=200, width=400, height=200))
     # Path to a grayscale template crop. When present, cv2.matchTemplate is
     # used; otherwise we fall back to the mean-colour check below.
     game_over_template: str | None = None
@@ -170,9 +168,7 @@ class RewardConfig:
     detection_patience: int = 2
 
     # --- Score detection -----------------------------------------------------
-    score_region: Region = field(
-        default_factory=lambda: Region(left=8, top=8, width=180, height=40)
-    )
+    score_region: Region = field(default_factory=lambda: Region(left=8, top=8, width=180, height=40))
     # "ocr" reads the number with Tesseract; "pixel" only detects that the score
     # box changed (and rewards the change). "auto" prefers OCR when available.
     score_mode: str = "auto"

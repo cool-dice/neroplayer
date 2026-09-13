@@ -149,8 +149,7 @@ def run_check(args: argparse.Namespace, config: AppConfig) -> int:
     print(f"Score read            : {score if score is not None else 'n/a'}")
     print(f"Points in the last 1s : {points}")
     print(
-        "\nIf the boxes in the screenshot do not line up, re-run "
-        "`python calibrate.py` and drag them again."
+        "\nIf the boxes in the screenshot do not line up, re-run `python calibrate.py` and drag them again."
     )
     return 0
 
