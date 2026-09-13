@@ -51,11 +51,22 @@ class GameOverDetector(Protocol):
 
 
 class TemplateGameOverDetector:
-    """Normalised cross-correlation against a saved game-over crop.
+    """Normalised matching against a saved game-over crop.
 
     Robust to minor scaling/anti-aliasing differences, and tolerant of the
     background changing around the banner.
+
+    Correlation (``TM_CCOEFF_NORMED``) is the right measure for a banner with
+    text or artwork in it, but it is undefined for a template with no variance:
+    both terms of the correlation coefficient vanish and OpenCV returns 0.0 for
+    a *perfect* match just as it does for a total mismatch. A user who
+    calibrates against a plain colour block would get a detector that can never
+    fire, silently disabling termination. For such templates we switch to
+    squared-difference matching, which compares absolute intensities and so
+    still separates the two cases.
     """
+
+    _FLAT_TEMPLATE_STD = 1e-3
 
     def __init__(self, template_path: str | Path, reward: RewardConfig) -> None:
         path = Path(template_path)
@@ -64,6 +75,7 @@ class TemplateGameOverDetector:
             raise FileNotFoundError(f"Could not read game-over template: {path}")
         self._template = template
         self._reward = reward
+        self._uniform = float(template.std()) < self._FLAT_TEMPLATE_STD
 
     def detect(self, frame: BGRFrame) -> tuple[bool, float]:
         search = crop_region(frame, self._reward.game_over_region)
@@ -76,8 +88,12 @@ class TemplateGameOverDetector:
             # the template. Stretching the region keeps detection working after
             # a window resize instead of silently never matching again.
             gray = cv2.resize(gray, (max(tw, gray.shape[1]), max(th, gray.shape[0])))
-        result = cv2.matchTemplate(gray, self._template, cv2.TM_CCOEFF_NORMED)
-        score = float(result.max())
+        if self._uniform:
+            result = cv2.matchTemplate(gray, self._template, cv2.TM_SQDIFF_NORMED)
+            score = 1.0 - float(result.min())
+        else:
+            result = cv2.matchTemplate(gray, self._template, cv2.TM_CCOEFF_NORMED)
+            score = float(result.max())
         return score >= self._reward.template_threshold, score
 
 

@@ -95,6 +95,25 @@ def test_template_detector_matches_saved_banner(tmp_path, reward):
     assert isinstance(build_game_over_detector(reward), TemplateGameOverDetector)
 
 
+def test_template_detector_handles_a_solid_colour_banner(tmp_path, reward):
+    """Regression: a flat template has no variance, so correlation is useless.
+
+    ``TM_CCOEFF_NORMED`` scores 0.0 for a perfect match on such a template,
+    which would leave the episode unable to ever terminate.
+    """
+    region = reward.game_over_region
+    template_path = tmp_path / "flat.png"
+    cv2.imwrite(str(template_path), np.full((region.height, region.width), 90, np.uint8))
+    detector = TemplateGameOverDetector(template_path, reward)
+
+    banner = np.zeros_like(game_over_frame())
+    banner[:] = 90
+    dark = np.zeros_like(banner)
+
+    assert detector.detect(banner) == (True, pytest.approx(1.0, abs=1e-3))
+    assert detector.detect(dark)[0] is False
+
+
 def test_missing_template_falls_back_to_colour(reward):
     reward.game_over_template = "assets/does-not-exist.png"
 
