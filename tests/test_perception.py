@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from ai_player.config import AudioConfig, Region, VisionConfig
 from ai_player.perception import (
     AudioFeatureExtractor,
     FrameProcessor,
     FrameStack,
+    LoopbackAudioCapture,
     SilentAudioCapture,
+    build_audio_source,
     crop_region,
 )
 
@@ -74,6 +77,28 @@ def test_audio_features_pad_short_and_silent_windows():
     assert short.shape == audio.observation_shape
     assert silence.shape == audio.observation_shape
     assert not np.any(silence)
+
+
+def test_disabled_audio_yields_a_silent_source():
+    audio = AudioConfig(enabled=False)
+
+    assert isinstance(build_audio_source(audio), SilentAudioCapture)
+
+
+def test_unavailable_loopback_degrades_to_silence(monkeypatch):
+    audio = AudioConfig()
+
+    def explode(self):
+        raise AssertionError  # soundcard raises bare assertions with no message
+
+    monkeypatch.setattr(LoopbackAudioCapture, "_resolve_microphone", explode)
+
+    with pytest.warns(RuntimeWarning, match="AssertionError"):
+        source = build_audio_source(audio)
+
+    # Training must survive a machine with no loopback device.
+    assert isinstance(source, SilentAudioCapture)
+    assert not np.any(source.read_window())
 
 
 def test_silent_capture_matches_window_length():

@@ -336,9 +336,13 @@ def build_audio_source(audio: AudioConfig, device_name: str | None = None) -> Au
     source = LoopbackAudioCapture(audio, device_name)
     try:
         source.start()
-    except Exception as exc:
+    except BaseException as exc:
+        # Some backends raise bare AssertionErrors with no message (soundcard
+        # does exactly that when PulseAudio is missing), so name the type too.
+        reason = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
         warnings.warn(
-            f"Falling back to silent audio: {exc}",
+            f"Falling back to silent audio ({reason}). Check that a loopback "
+            "device exists, or set audio.enabled = false to stop trying.",
             RuntimeWarning,
             stacklevel=2,
         )
