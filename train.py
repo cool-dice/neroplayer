@@ -54,6 +54,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-audio", action="store_true", help="Disable audio capture and the audio branch")
     parser.add_argument("--render", action="store_true", help="Show the captured frames in a window")
     parser.add_argument(
+        "--check-env",
+        action="store_true",
+        help="Validate the environment against the Gymnasium/SB3 API and exit",
+    )
+    parser.add_argument(
         "--countdown",
         type=int,
         default=0,
@@ -144,9 +149,42 @@ def install_interrupt_handler() -> None:
     signal.signal(signal.SIGINT, handler)
 
 
+def check_environment(config: AppConfig, *, mock: bool) -> int:
+    """Validate the env against both API checkers, without sending any input.
+
+    Worth running after every calibration change: it catches observation-space
+    mismatches and reset/step contract violations in seconds, instead of after
+    a training run has already wasted an hour.
+
+    SB3 warns that the 2-D audio observation is "neither an image, nor a 1D
+    vector". That is expected: ``MultiModalExtractor`` consumes the
+    spectrogram's shape deliberately instead of flattening it blindly.
+    """
+    from gymnasium.utils.env_checker import check_env as gym_check_env
+    from stable_baselines3.common.env_checker import check_env as sb3_check_env
+
+    # Key injection adds nothing to an API check, so keep it off entirely.
+    env = make_env(config, mock=mock, dry_run=True, seed=config.train.seed)
+    try:
+        print(f"observation_space: {env.observation_space}")
+        print(f"action_space     : {env.action_space}")
+        gym_check_env(env, skip_render_check=True)
+        sb3_check_env(env, warn=True)
+    except (AssertionError, ValueError) as exc:
+        print(f"\nEnvironment check FAILED: {exc}")
+        return 1
+    finally:
+        env.close()
+    print("\nEnvironment check passed.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     config = build_config(args)
+
+    if args.check_env:
+        return check_environment(config, mock=args.mock)
 
     run_name = args.run_name or f"{config.train.algo}_{time.strftime('%Y%m%d-%H%M%S')}"
     model_dir = MODELS_DIR / run_name

@@ -119,9 +119,11 @@ agent learns to survive longer.
    Use `hold_keys: true` for continuous movement (the key stays down until the
    agent picks a different action) and `false` for discrete inputs like jumping.
 
-5. Verify the reward signal *without* sending any input:
+5. Verify the environment contract and the reward signal, without sending any
+   input:
 
    ```bash
+   python train.py --config config.json --check-env      # API + shapes, seconds
    python train.py --config config.json --dry-run --timesteps 2000
    ```
 

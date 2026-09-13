@@ -98,6 +98,10 @@ def test_cli_overrides_reach_the_config():
     assert config.train.seed == 5
 
 
+def test_check_env_validates_the_environment():
+    assert train_script.main(["--mock", "--check-env"]) == 0
+
+
 def test_main_runs_a_tiny_training_loop(tmp_path, monkeypatch):
     monkeypatch.setattr(train_script, "MODELS_DIR", tmp_path / "models")
     monkeypatch.setattr(train_script, "LOGS_DIR", tmp_path / "logs")
