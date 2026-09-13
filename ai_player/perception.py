@@ -185,7 +185,6 @@ class AudioFeatureExtractor:
     def __init__(self, audio: AudioConfig) -> None:
         self._audio = audio
         self._shape = audio.observation_shape
-        self._mel_basis: np.ndarray | None = None
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -247,6 +246,7 @@ class LoopbackAudioCapture:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._error: BaseException | None = None
+        self._degraded = False
 
     def start(self) -> None:
         if self._thread is not None:
@@ -286,10 +286,23 @@ class LoopbackAudioCapture:
             self._error = exc
 
     def read_window(self) -> np.ndarray:
-        """Return the most recent ``window_samples`` of mono audio."""
+        """Return the most recent ``window_samples`` of mono audio.
+
+        If the recording thread died (device unplugged, session stolen by an
+        exclusive-mode app) this degrades to silence and warns once. Aborting a
+        multi-hour training run over a lost audio device would be worse than
+        finishing it with a dead input.
+        """
         if self._error is not None:
             error, self._error = self._error, None
-            raise RuntimeError(f"Loopback audio capture failed: {error}") from error
+            self._degraded = True
+            warnings.warn(
+                f"Loopback audio capture stopped ({error}); returning silence.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        if self._degraded:
+            return np.zeros(self._audio.window_samples, dtype=np.float32)
         with self._lock:
             return self._buffer.copy()
 

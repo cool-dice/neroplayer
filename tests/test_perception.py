@@ -101,6 +101,21 @@ def test_unavailable_loopback_degrades_to_silence(monkeypatch):
     assert not np.any(source.read_window())
 
 
+def test_recorder_failure_mid_run_degrades_to_silence():
+    audio = AudioConfig()
+    source = LoopbackAudioCapture(audio)
+    source._buffer = np.ones(audio.window_samples, dtype=np.float32)
+    source._error = OSError("device disconnected")
+
+    with pytest.warns(RuntimeWarning, match="device disconnected"):
+        first = source.read_window()
+    second = source.read_window()
+
+    # Losing the audio device must not abort a long training run.
+    assert not np.any(first)
+    assert not np.any(second)
+
+
 def test_silent_capture_matches_window_length():
     audio = AudioConfig()
     source = SilentAudioCapture(audio)
