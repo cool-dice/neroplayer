@@ -19,7 +19,7 @@ class ScreenCapture:
         self._frames: deque[np.ndarray] = deque(maxlen=config.frame_stack)
         self._mss: Any | None = None
 
-    def __enter__(self) -> "ScreenCapture":
+    def __enter__(self) -> ScreenCapture:
         self.start()
         return self
 
