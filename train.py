@@ -6,6 +6,7 @@ Usage::
     python train.py --algo dqn --timesteps 50000
     python train.py --resume models/game_agent.zip
     python train.py --check-env           # validate the env against the Gym API and exit
+    python train.py --mock --smoke          # in-process arcade, tiny PPO run
     python train.py --dry-run --no-audio  # exercise the loop without sending input
 
 The policy is Stable-Baselines3's ``MultiInputPolicy``: the ``image`` entry of
@@ -21,6 +22,7 @@ import argparse
 import logging
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from stable_baselines3 import DQN, PPO
@@ -49,13 +51,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--check-env", action="store_true", help="Run SB3's env checker and exit")
     parser.add_argument("--dry-run", action="store_true", help="Log key presses instead of sending them")
     parser.add_argument("--no-audio", action="store_true", help="Disable loopback audio capture")
-    parser.add_argument("--countdown", type=int, default=3, help="Seconds to focus the game before training")
+    parser.add_argument("--mock", action="store_true", help="Train on the built-in dodge arcade (no OS hooks)")
+    parser.add_argument("--smoke", action="store_true", help="Tiny PPO run to verify the training loop")
+    parser.add_argument("--countdown", type=int, default=None, help="Seconds to focus the game before training")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args(argv)
 
 
-def build_env(config: Config, *, dry_run: bool, audio_enabled: bool) -> Monitor:
+def build_env(config: Config, *, dry_run: bool, audio_enabled: bool, mock: bool = False) -> Monitor:
     """Create the game environment wrapped in ``Monitor`` for episode stats."""
+    if mock:
+        from mock_game import build_mock_env
+
+        env = build_mock_env(seed=config.train.seed)
+        config.train.log_dir.mkdir(parents=True, exist_ok=True)
+        return Monitor(env, filename=str(config.train.log_dir / "monitor"))
+
     audio_cfg = config.audio if audio_enabled else AudioConfig(enabled=False)
     env = GameEnv(
         config,
@@ -99,8 +110,27 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     config = CONFIG
+    if args.smoke:
+        config = replace(
+            config,
+            train=replace(
+                config.train,
+                ppo={
+                    **config.train.ppo,
+                    "n_steps": 64,
+                    "batch_size": 64,
+                    "n_epochs": 2,
+                },
+                checkpoint_every_steps=128,
+            ),
+        )
 
-    env = build_env(config, dry_run=args.dry_run, audio_enabled=not args.no_audio)
+    env = build_env(
+        config,
+        dry_run=args.dry_run,
+        audio_enabled=not args.no_audio,
+        mock=args.mock,
+    )
 
     if args.check_env:
         from stable_baselines3.common.env_checker import check_env
@@ -121,12 +151,16 @@ def main(argv: list[str] | None = None) -> int:
         save_replay_buffer=False,
     )
 
-    countdown(args.countdown)
-    logger.info("Training %s for %d timesteps", args.algo.upper(), args.timesteps)
+    wait = 0 if args.mock or args.smoke else 3
+    if args.countdown is not None:
+        wait = args.countdown
+    countdown(wait)
+    timesteps = 256 if args.smoke else args.timesteps
+    logger.info("Training %s for %d timesteps", args.algo.upper(), timesteps)
     status = 0
     try:
         model.learn(
-            total_timesteps=args.timesteps,
+            total_timesteps=timesteps,
             callback=checkpoint_cb,
             reset_num_timesteps=args.resume is None,
             progress_bar=False,

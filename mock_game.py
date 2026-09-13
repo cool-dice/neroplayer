@@ -1,19 +1,41 @@
-"""In-process arcade used to exercise the RL pipeline without a real window.
+"""In-process dodge arcade used to train and test the pipeline without a window.
 
-The mock is a tiny dodge game rendered with OpenCV: a player rectangle on
-the left, hazards sliding in from the right. Collision paints a GAME OVER
-banner that `observer.py` can detect; passing a hazard lights up extra
-pixels in the score HUD so the pixel-delta reward fires.
+The mock speaks the same contracts as the hardware stack:
+
+* :class:`MockArcade` is a ``FrameSource`` (BGR frames the observer can read).
+* :class:`MockController` applies discrete actions to that arcade instead of
+  sending DirectInput keystrokes.
+
+Collision paints the game-over colour into a known ROI (so ``GameObserver``
+fires ``terminated``); passing a hazard lights extra pixels in the score HUD
+(so the pixel-change reward fires). ``python train.py --mock --smoke`` is the
+fastest way to confirm Gymnasium + PPO before pointing the agent at a real
+game.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import cv2
 import numpy as np
 
-from observer import make_game_over_banner
+from config import (
+    CONFIG,
+    AudioConfig,
+    Config,
+    ControlConfig,
+    Region,
+)
+from environment import GameEnv
+from observer import GameObserver
+from perception import AudioCapture, ScreenCapture
+
+MOCK_WIDTH = 320
+MOCK_HEIGHT = 240
+MOCK_SCORE_REGION = Region(left=10, top=8, width=180, height=40)
+MOCK_GAME_OVER_REGION = Region(left=10, top=85, width=300, height=70)
+MOCK_GAME_OVER_BGR = (40, 40, 200)
 
 
 @dataclass
@@ -28,10 +50,8 @@ class _Hazard:
 
 @dataclass
 class MockArcade:
-    """Deterministic-enough mini-game that speaks the same interfaces as hardware."""
+    """Tiny vertical-dodge game rendered with OpenCV."""
 
-    width: int = 320
-    height: int = 240
     seed: int = 0
     player_x: int = 36
     player_w: int = 18
@@ -45,58 +65,27 @@ class MockArcade:
     over: bool = field(init=False)
     frame_i: int = field(init=False)
     scored_this_step: bool = field(init=False)
-    _audio: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.rng = np.random.default_rng(self.seed)
         self.restart()
 
-    # -- control interface -------------------------------------------------
-    def apply_action(self, action: int) -> None:
-        if self.over:
-            return
-        if action == 0:
-            self.player_y -= self.player_speed
-        elif action == 1:
-            self.player_y += self.player_speed
-        self.player_y = int(np.clip(self.player_y, 8, self.height - self.player_h - 8))
-        self._physics()
+    # -- FrameSource -------------------------------------------------------
+    def grab(self) -> np.ndarray:
+        frame = np.full((MOCK_HEIGHT, MOCK_WIDTH, 3), (28, 24, 22), dtype=np.uint8)
 
-    def restart(self) -> None:
-        self.player_y = self.height // 2
-        self.hazards = []
-        self.score = 0
-        self.over = False
-        self.frame_i = 0
-        self.scored_this_step = False
-        self._audio = np.zeros(0, dtype=np.float32)
-        self._spawn()
-
-    # -- perception interface ----------------------------------------------
-    def grab_bgr(self) -> np.ndarray:
-        frame = np.full((self.height, self.width, 3), 24, dtype=np.uint8)
-        frame[:, :] = (28, 24, 22)
-
-        # Score HUD: one bright bar per point so the observer can see deltas.
-        hud_x, hud_y, hud_w, hud_h = 10, 8, 180, 40
-        cv2.rectangle(frame, (hud_x, hud_y), (hud_x + hud_w, hud_y + hud_h), (18, 18, 18), -1)
+        x, y, w, h = MOCK_SCORE_REGION.left, MOCK_SCORE_REGION.top, MOCK_SCORE_REGION.width, MOCK_SCORE_REGION.height
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (18, 18, 18), -1)
         bar_w = 6
-        for i in range(min(self.score, hud_w // (bar_w + 2))):
-            x0 = hud_x + 4 + i * (bar_w + 2)
-            cv2.rectangle(
-                frame,
-                (x0, hud_y + 8),
-                (x0 + bar_w, hud_y + hud_h - 8),
-                (240, 240, 240),
-                -1,
-            )
+        for i in range(min(self.score, w // (bar_w + 2))):
+            x0 = x + 4 + i * (bar_w + 2)
+            cv2.rectangle(frame, (x0, y + 8), (x0 + bar_w, y + h - 8), (240, 240, 240), -1)
 
-        color_player = (220, 200, 40)
         cv2.rectangle(
             frame,
             (self.player_x, self.player_y),
             (self.player_x + self.player_w, self.player_y + self.player_h),
-            color_player,
+            (220, 200, 40),
             -1,
         )
         for hz in self.hazards:
@@ -105,34 +94,42 @@ class MockArcade:
         if self.over:
             overlay = frame.copy()
             overlay[:] = (0, 0, 40)
-            cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
-            banner = make_game_over_banner()
-            bh, bw = banner.shape[:2]
-            x = (self.width - bw) // 2
-            y = (self.height - bh) // 2
-            x = max(0, x)
-            y = max(0, y)
-            h = min(bh, self.height - y)
-            w = min(bw, self.width - x)
-            frame[y : y + h, x : x + w] = banner[:h, :w]
+            cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
+            gx, gy = MOCK_GAME_OVER_REGION.left, MOCK_GAME_OVER_REGION.top
+            gw, gh = MOCK_GAME_OVER_REGION.width, MOCK_GAME_OVER_REGION.height
+            # Solid fill last: the colour detector matches mean BGR, and text
+            # would pull that mean off the target.
+            frame[gy : gy + gh, gx : gx + gw] = MOCK_GAME_OVER_BGR
         return frame
 
-    def audio_samples(self, n: int, sample_rate: int) -> np.ndarray:
-        """Return a short cue when a point is scored, otherwise silence."""
-        t = np.arange(n, dtype=np.float32) / float(sample_rate)
-        if self.scored_this_step:
-            return (0.35 * np.sin(2 * np.pi * 880.0 * t)).astype(np.float32)
-        if self.over:
-            return (0.2 * np.sin(2 * np.pi * 110.0 * t)).astype(np.float32)
-        return np.zeros(n, dtype=np.float32)
+    def close(self) -> None:
+        return
 
-    # -- internals ---------------------------------------------------------
-    def _physics(self) -> None:
+    # -- control -----------------------------------------------------------
+    def apply_action(self, action: int) -> None:
         if self.over:
             return
+        if action == 0:
+            self.player_y -= self.player_speed
+        elif action == 1:
+            self.player_y += self.player_speed
+        self.player_y = int(np.clip(self.player_y, 8, MOCK_HEIGHT - self.player_h - 8))
+        self._physics()
+
+    def restart(self) -> None:
+        self.player_y = MOCK_HEIGHT // 2
+        self.hazards = []
+        self.score = 0
+        self.over = False
+        self.frame_i = 0
+        self.scored_this_step = False
+        self._spawn()
+
+    def _physics(self) -> None:
         self.scored_this_step = False
         self.frame_i += 1
-        px1, py1 = self.player_x + self.player_w, self.player_y + self.player_h
+        px1 = self.player_x + self.player_w
+        py1 = self.player_y + self.player_h
         remaining: list[_Hazard] = []
         for hz in self.hazards:
             hz.x -= hz.speed
@@ -151,9 +148,74 @@ class MockArcade:
             self._spawn()
 
     def _spawn(self) -> None:
-        y = int(self.rng.integers(16, self.height - 64))
-        self.hazards.append(_Hazard(x=self.width - 20, y=y))
+        # Aim near the player so a no-op policy dies and the agent must dodge.
+        aimed = int(self.player_y - 16)
+        jitter = int(self.rng.integers(-12, 13))
+        y = int(np.clip(aimed + jitter, 16, MOCK_HEIGHT - 64))
+        self.hazards.append(_Hazard(x=MOCK_WIDTH - 20, y=y))
 
     @staticmethod
     def _aabb(ax0: int, ay0: int, ax1: int, ay1: int, bx0: int, by0: int, bx1: int, by1: int) -> bool:
         return ax0 < bx1 and ax1 > bx0 and ay0 < by1 and ay1 > by0
+
+
+class MockController:
+    """Same public surface as :class:`GameController`, driving :class:`MockArcade`."""
+
+    def __init__(self, game: MockArcade, cfg: ControlConfig) -> None:
+        self.game = game
+        self.cfg = cfg
+        self.dry_run = True
+
+    @property
+    def n_actions(self) -> int:
+        return len(self.cfg.actions)
+
+    def action_name(self, action: int) -> str:
+        return self.cfg.action_names[action]
+
+    def execute(self, action: int) -> None:
+        if not 0 <= action < self.n_actions:
+            raise ValueError(f"action {action} out of range [0, {self.n_actions})")
+        self.game.apply_action(action)
+
+    def restart(self) -> None:
+        self.game.restart()
+
+    def close(self) -> None:
+        return
+
+
+def mock_config() -> Config:
+    """Config whose ROIs line up with the mock canvas (no wall-clock sleeps)."""
+    return replace(
+        CONFIG,
+        screen=replace(CONFIG.screen, target_fps=10_000),
+        audio=AudioConfig(enabled=False),
+        controls=replace(CONFIG.controls, key_hold_seconds=0.0, restart_delay_seconds=0.0, focus_click=None),
+        reward=replace(
+            CONFIG.reward,
+            game_over_template=CONFIG.reward.game_over_template.parent / "missing_mock.png",
+            use_ocr=False,
+            score_region=MOCK_SCORE_REGION,
+            game_over_region=MOCK_GAME_OVER_REGION,
+            game_over_color_bgr=MOCK_GAME_OVER_BGR,
+            game_over_color_tolerance=15,
+            game_over_confirm_frames=1,
+            score_change_pixel_fraction=0.02,
+        ),
+        train=replace(CONFIG.train, max_episode_steps=500),
+    )
+
+
+def build_mock_env(seed: int = 0) -> GameEnv:
+    """Fully wired Gymnasium env that never touches the display or keyboard."""
+    cfg = mock_config()
+    game = MockArcade(seed=seed)
+    return GameEnv(
+        cfg,
+        screen=ScreenCapture(cfg.screen, source=game),
+        audio=AudioCapture(cfg.audio, start=False),
+        controller=MockController(game, cfg.controls),
+        observer=GameObserver(cfg.reward),
+    )

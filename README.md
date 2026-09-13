@@ -30,6 +30,7 @@ game-specific API.
 | `environment.py` | `GameEnv(gymnasium.Env)` with a `Dict(image, audio)` observation space and `Discrete` action space; wall-clock paced `step()`. |
 | `train.py` | Builds the env, a `MultiInputPolicy` PPO/DQN model, periodic checkpoints, graceful save on Ctrl+C. |
 | `play.py` | Runs a saved model for a few episodes. |
+| `mock_game.py` | Built-in dodge arcade used by `--mock` so the PPO loop can run without a real window. |
 | `tools/calibrate.py` | Screenshots the capture region with the score / game-over ROIs drawn on it; can crop the game-over template. |
 | `assets/templates/` | Put `game_over.png` here (see the README inside). |
 
@@ -50,6 +51,20 @@ pip install -r requirements.txt
 
 For GPU training replace the `torch` line with the CUDA wheel from
 [pytorch.org](https://pytorch.org/get-started/locally/).
+
+## Smoke-test the pipeline (any OS)
+
+No game window and no Windows APIs — trains PPO for a few hundred steps on the
+built-in dodge arcade. This is the fastest way to confirm Gymnasium, the
+CNN+MLP `MultiInputPolicy`, and the OpenCV observer:
+
+```bash
+python -m pytest
+python train.py --mock --smoke
+python play.py --mock --episodes 1
+```
+
+Weights land in `models/game_agent.zip`.
 
 ## Quick start
 

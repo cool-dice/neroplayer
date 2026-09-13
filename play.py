@@ -31,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of argmax")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-audio", action="store_true")
+    parser.add_argument("--mock", action="store_true", help="Play the built-in dodge arcade")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -38,10 +39,11 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Model not found: %s (train one with train.py first)", args.model)
         return 1
 
-    env = build_env(CONFIG, dry_run=args.dry_run, audio_enabled=not args.no_audio)
+    env = build_env(CONFIG, dry_run=args.dry_run, audio_enabled=not args.no_audio, mock=args.mock)
     model = (PPO if args.algo == "ppo" else DQN).load(args.model, env=env)
 
-    countdown(3)
+    if not args.mock:
+        countdown(3)
     try:
         for episode in range(1, args.episodes + 1):
             obs, _ = env.reset()
