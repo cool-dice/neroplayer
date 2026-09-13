@@ -93,8 +93,14 @@ normalised:
 
 | | survival at 10k steps | at 150k steps | eval over 20 episodes |
 | --- | --- | --- | --- |
-| raw rewards (`--no-reward-norm`) | 18.8 steps | 23.3 steps | 20.6 steps, 0.8 points |
-| normalised rewards (default) | 19.9 steps | 51.6 steps | 51.3 steps, 5.6 points |
+| raw rewards (`--no-reward-norm`) | 24.1 steps | 24.5 steps | 25.7 steps, 1.2 points |
+| normalised rewards (default) | 22.5 steps | 288 steps | 966 steps, 146 points |
+
+The raw-reward run never leaves its starting policy. PPO shares one feature
+extractor between the actor and the critic, and with a −100 terminal penalty
+next to a +0.1 drip the value loss dominates the gradient, so the trunk is
+optimised to predict the return rather than to see obstacles. Scaling the
+reward is what makes the run learn at all, not a marginal tuning win.
 
 Reproduce with:
 
@@ -224,7 +230,7 @@ reward = step_reward                    # +0.1 survival drip, dense signal
 - `reward.game_over_penalty` vs `reward.step_reward` — if the agent suicides
   early, the penalty is too small relative to the drip it is forfeiting.
 - `train.normalize_reward` — on by default for PPO, and the single biggest
-  difference measured so far (see the table above: 51.3 versus 20.6 steps of
+  difference measured so far (see the table above: 966 versus 26 steps of
   survival). The reward weights are hand-picked magnitudes (+0.1 against −100)
   and PPO shares one feature extractor between actor and critic, so raw
   rewards produce a value loss in the tens against a policy gradient in the
