@@ -42,7 +42,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--deterministic", action="store_true", help="Take argmax actions")
     parser.add_argument("--render", action="store_true", help="Show captured frames in a window")
     parser.add_argument("--record", type=Path, default=None, help="Write captured frames to this .mp4")
-    parser.add_argument("--fps", type=float, default=None, help="Override the agent decision rate")
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=None,
+        help="Override the agent decision rate (ignored by --mock, which runs unpaced)",
+    )
     parser.add_argument("--countdown", type=int, default=0, help="Seconds to wait before starting")
     return parser.parse_args(argv)
 

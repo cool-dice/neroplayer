@@ -44,7 +44,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--resume", type=Path, default=None, help="Path to a .zip model to continue training")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", default=None, help="auto | cpu | cuda")
-    parser.add_argument("--fps", type=float, default=None, help="Override the agent decision rate")
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=None,
+        help="Override the agent decision rate (ignored by --mock, which runs unpaced)",
+    )
     parser.add_argument("--mock", action="store_true", help="Train against the bundled simulated game")
     parser.add_argument(
         "--dry-run",

@@ -84,6 +84,22 @@ tensorboard --logdir logs
 Watch `rollout/ep_rew_mean` and `rollout/ep_len_mean`: both should climb as the
 agent learns to survive longer.
 
+## Results on the simulated game
+
+Two 150k-step PPO runs (identical seed, 84×84 frames + mel spectrogram,
+~170 env steps/s on CPU), differing only in whether rewards were normalised:
+
+| | survival at 10k steps | at 150k steps | eval over 20 episodes |
+| --- | --- | --- | --- |
+| raw rewards (`--no-reward-norm`) | 19.6 steps | 22.0 steps | 19.2 steps, 0.2 points |
+| normalised rewards (default) | 20.2 steps | 41.2 steps | 42.5 steps, 2.5 points |
+
+Both runs are flat for the first ~50k steps and then diverge sharply, which is
+what the reward-scale argument above predicts. Neither agent has mastered the
+game — pixel-based control needs millions of steps for that, and the simulator
+exists to validate the pipeline rather than to serve as a benchmark — but the
+plumbing clearly produces a learning signal the policy can exploit.
+
 ## Pointing it at a real game
 
 1. Open the game in a window and leave it visible.
@@ -180,13 +196,15 @@ reward = step_reward                    # +0.1 survival drip, dense signal
   state; the audio branch disappears from the network entirely.
 - `reward.game_over_penalty` vs `reward.step_reward` — if the agent suicides
   early, the penalty is too small relative to the drip it is forfeiting.
-- `train.normalize_reward` — on by default for PPO. The reward weights are
-  hand-picked magnitudes (+0.1 against −100) and PPO shares one feature
-  extractor between actor and critic, so raw rewards produce a value loss in
-  the tens against a policy gradient in the thousandths, and the shared CNN
-  ends up being trained almost entirely by the critic. `--no-reward-norm`
-  turns it off. It is skipped for DQN, whose replay buffer would otherwise mix
-  transitions scaled by different running statistics.
+- `train.normalize_reward` — on by default for PPO, and the single biggest
+  difference measured so far (see the table above: 42.5 versus 19.2 steps of
+  survival). The reward weights are hand-picked magnitudes (+0.1 against −100)
+  and PPO shares one feature extractor between actor and critic, so raw
+  rewards produce a value loss in the tens against a policy gradient in the
+  thousandths, and the shared CNN ends up being trained almost entirely by the
+  critic. `--no-reward-norm` turns it off. It is skipped for DQN, whose replay
+  buffer would otherwise mix transitions scaled by different running
+  statistics.
 - `train.n_steps` — real-time games produce samples slowly. 512 keeps PPO
   updating often; large rollouts mean very long waits between improvements.
 
@@ -194,7 +212,7 @@ reward = step_reward                    # +0.1 survival drip, dense signal
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest        # 44 tests, ~6s, no display or sound card needed
+python -m pytest        # 54 tests, ~11s, no display or sound card needed
 python -m ruff check .
 ```
 

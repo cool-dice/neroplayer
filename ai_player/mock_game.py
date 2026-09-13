@@ -307,7 +307,12 @@ class MockController:
 
 
 def mock_config(base: AppConfig | None = None) -> AppConfig:
-    """Copy ``base`` and point every region at the mock canvas."""
+    """Copy ``base`` and point every region at the mock canvas.
+
+    Also drops the frame rate cap: the simulation advances on capture rather
+    than in wall-clock time, so pacing would only slow training down. This
+    overrides ``env.target_fps`` (and therefore ``train.py --fps``).
+    """
     config = copy.deepcopy(base) if base is not None else AppConfig()
     config.capture.region = Region(left=0, top=0, width=CANVAS_WIDTH, height=CANVAS_HEIGHT)
     config.reward.game_over_region = mock_game_over_region()
