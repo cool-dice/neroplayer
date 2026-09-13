@@ -17,6 +17,22 @@ pip install -r requirements.txt
 python train.py --mock --timesteps 20000      # trains against the simulator
 ```
 
+## How it fits together
+
+```
+  ┌───────────────┐    mss + cv2     ┌──────────────┐
+  │               │ ───────────────► │  perception  │──► frames  (4 x 84 x 84 uint8)
+  │  game window  │   soundcard +    │              │──► audio   (32 x 30 log-mel)
+  │               │   librosa        └──────────────┘         │
+  │               │                  ┌──────────────┐         ▼
+  │               │ ◄─────────────── │   controls   │ ◄── PPO / DQN  (MultiModalExtractor:
+  │               │  pydirectinput   └──────────────┘         ▲        CNN + audio MLP)
+  │               │                  ┌──────────────┐         │
+  │               │ ───────────────► │   observer   │──► reward, terminated
+  └───────────────┘  matchTemplate   └──────────────┘
+                     + OCR / pixels
+```
+
 ## Why the pieces exist
 
 | Module | Responsibility |
@@ -28,7 +44,8 @@ python train.py --mock --timesteps 20000      # trains against the simulator
 | `ai_player/environment.py` | The `gymnasium.Env`: Dict observation space (image + audio), `Discrete` actions, fixed-rate stepping, episode resets. |
 | `ai_player/policies.py` | `MultiModalExtractor`: CNN branch + audio MLP branch → fused feature vector for SB3. |
 | `ai_player/mock_game.py` | A three-lane dodger rendered with OpenCV, plus drop-in capture/audio/control backends. Used by `--mock` and the tests. |
-| `train.py` / `play.py` / `calibrate.py` | Training loop, evaluation/recording, and interactive region calibration. |
+| `train.py` / `play.py` / `calibrate.py` | Training loop, evaluation/recording, and region calibration (pick / check / live preview). |
+| `assets/templates/` | Where the game-over template crop lives. |
 
 ## Install
 
@@ -76,7 +93,19 @@ agent learns to survive longer.
    template while the game sits on that screen. Everything is written to
    `config.json`.
 
-3. Set the key map in `config.json` if the defaults are wrong. `action_keys`
+3. Check what the agent sees. This needs no GUI, so it also works over remote
+   sessions and when you edited `config.json` by hand:
+
+   ```bash
+   python calibrate.py --config config.json --check   # annotated screenshot + readings
+   python calibrate.py --config config.json --live    # the 84x84 view, upscaled
+   ```
+
+   `--check` writes `assets/captures/calibration.png` with the score and
+   game-over boxes drawn on it, and prints whether the game-over detector
+   fires, which score reader is active, and what it currently reads.
+
+4. Set the key map in `config.json` if the defaults are wrong. `action_keys`
    maps action index → key, and `null` is the mandatory "do nothing" action:
 
    ```json
@@ -90,7 +119,7 @@ agent learns to survive longer.
    Use `hold_keys: true` for continuous movement (the key stays down until the
    agent picks a different action) and `false` for discrete inputs like jumping.
 
-4. Verify the reward signal *without* sending any input:
+5. Verify the reward signal *without* sending any input:
 
    ```bash
    python train.py --config config.json --dry-run --timesteps 2000
@@ -100,7 +129,7 @@ agent learns to survive longer.
    and confirm in the console that rewards jump when you score and that
    episodes end when you die. Fix the regions before training for real.
 
-5. Train, giving yourself time to focus the game window:
+6. Train, giving yourself time to focus the game window:
 
    ```bash
    python train.py --config config.json --timesteps 500000 --countdown 5

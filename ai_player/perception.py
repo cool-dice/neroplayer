@@ -67,7 +67,8 @@ class ScreenCapture:
                 "mss is required for screen capture. Install it with "
                 "`pip install mss`, or run with --mock to use the bundled game."
             ) from exc
-        self._sct = mss.mss()
+        # mss >= 10 renamed the entry point to MSS and deprecated the old name.
+        self._sct = getattr(mss, "MSS", mss.mss)()
 
     def grab(self) -> BGRFrame:
         """Return the captured region as a contiguous BGR uint8 array."""

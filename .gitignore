@@ -21,4 +21,5 @@ runs/
 
 # Machine-specific calibration (config.example.json is tracked instead)
 config.json
-assets/game_over.png
+assets/templates/*.png
+assets/captures/

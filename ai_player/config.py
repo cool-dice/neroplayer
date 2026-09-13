@@ -19,6 +19,8 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ASSETS_DIR = PROJECT_ROOT / "assets"
+TEMPLATES_DIR = ASSETS_DIR / "templates"
+CAPTURES_DIR = ASSETS_DIR / "captures"
 MODELS_DIR = PROJECT_ROOT / "models"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
