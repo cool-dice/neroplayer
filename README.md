@@ -180,6 +180,13 @@ reward = step_reward                    # +0.1 survival drip, dense signal
   state; the audio branch disappears from the network entirely.
 - `reward.game_over_penalty` vs `reward.step_reward` — if the agent suicides
   early, the penalty is too small relative to the drip it is forfeiting.
+- `train.normalize_reward` — on by default for PPO. The reward weights are
+  hand-picked magnitudes (+0.1 against −100) and PPO shares one feature
+  extractor between actor and critic, so raw rewards produce a value loss in
+  the tens against a policy gradient in the thousandths, and the shared CNN
+  ends up being trained almost entirely by the critic. `--no-reward-norm`
+  turns it off. It is skipped for DQN, whose replay buffer would otherwise mix
+  transitions scaled by different running statistics.
 - `train.n_steps` — real-time games produce samples slowly. 512 keeps PPO
   updating often; large rollouts mean very long waits between improvements.
 

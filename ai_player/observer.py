@@ -71,8 +71,9 @@ class TemplateGameOverDetector:
         gray = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY) if search.ndim == 3 else search
         th, tw = self._template.shape[:2]
         if gray.shape[0] < th or gray.shape[1] < tw:
-            # Region smaller than the template: compare the template shrunk to
-            # fit rather than silently reporting "no game over" forever.
+            # matchTemplate requires the search image to be at least as large as
+            # the template. Stretching the region keeps detection working after
+            # a window resize instead of silently never matching again.
             gray = cv2.resize(gray, (max(tw, gray.shape[1]), max(th, gray.shape[0])))
         result = cv2.matchTemplate(gray, self._template, cv2.TM_CCOEFF_NORMED)
         score = float(result.max())

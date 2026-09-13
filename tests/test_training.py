@@ -98,6 +98,51 @@ def test_cli_overrides_reach_the_config():
     assert config.train.seed == 5
 
 
+def test_reward_normalisation_wraps_ppo_only():
+    from stable_baselines3.common.vec_env import VecNormalize
+
+    env = make_env(mock=True, seed=3)
+    vec_env = DummyVecEnv([lambda: Monitor(env)])
+    config = train_script.build_config(train_script.parse_args(["--mock"]))
+
+    wrapped = train_script.wrap_reward_normalisation(config, vec_env, None)
+    assert isinstance(wrapped, VecNormalize)
+    assert wrapped.norm_obs is False  # the policy must see raw pixels
+
+    config.train.algo = "dqn"  # off-policy: a replay buffer would mix scales
+    assert train_script.wrap_reward_normalisation(config, vec_env, None) is vec_env
+
+    config.train.algo = "ppo"
+    config.train.normalize_reward = False
+    assert train_script.wrap_reward_normalisation(config, vec_env, None) is vec_env
+    vec_env.close()
+
+
+def test_training_saves_reward_statistics_for_resume(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_script, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(train_script, "LOGS_DIR", tmp_path / "logs")
+
+    train_script.main(["--mock", "--timesteps", "48", "--run-name", "norm", "--no-audio"])
+    stats = tmp_path / "models" / "norm" / "vec_normalize.pkl"
+    assert stats.exists()
+
+    # Resuming must pick the statistics back up instead of restarting them.
+    status = train_script.main(
+        [
+            "--mock",
+            "--timesteps",
+            "48",
+            "--run-name",
+            "norm-resumed",
+            "--no-audio",
+            "--resume",
+            str(tmp_path / "models" / "norm" / "final.zip"),
+        ]
+    )
+
+    assert status == 0
+
+
 def test_check_env_validates_the_environment():
     assert train_script.main(["--mock", "--check-env"]) == 0
 

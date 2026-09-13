@@ -218,6 +218,14 @@ class TrainConfig:
     train_freq: int = 4
     target_update_interval: int = 1_000
     exploration_fraction: float = 0.2
+    # Divide rewards by their running standard deviation before the update.
+    # The reward weights are hand-picked magnitudes (+0.1 vs -100), and PPO
+    # shares one feature extractor between the actor and the critic, so an
+    # un-normalised value loss in the tens dominates the policy gradient.
+    # On-policy only; it is ignored for DQN, whose replay buffer would mix
+    # transitions scaled by different running statistics.
+    normalize_reward: bool = True
+    clip_reward: float = 10.0
     # Fused image+audio feature width produced by MultiModalExtractor.
     features_dim: int = 512
     checkpoint_every: int = 10_000

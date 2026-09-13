@@ -24,7 +24,7 @@ from types import FrameType
 from stable_baselines3 import DQN, PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from ai_player.config import LOGS_DIR, MODELS_DIR, AppConfig, load_config
 from ai_player.environment import make_env
@@ -52,6 +52,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Capture the real screen but swallow key presses (safe calibration run)",
     )
     parser.add_argument("--no-audio", action="store_true", help="Disable audio capture and the audio branch")
+    parser.add_argument(
+        "--no-reward-norm",
+        action="store_true",
+        help="Train on raw reward magnitudes instead of normalising them (PPO)",
+    )
     parser.add_argument("--render", action="store_true", help="Show the captured frames in a window")
     parser.add_argument(
         "--check-env",
@@ -82,6 +87,8 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.env.target_fps = args.fps
     if args.no_audio:
         config.audio.enabled = False
+    if args.no_reward_norm:
+        config.train.normalize_reward = False
     return config
 
 
@@ -128,6 +135,47 @@ def build_model(config: AppConfig, env: DummyVecEnv, tensorboard_log: Path | Non
         target_update_interval=train.target_update_interval,
         exploration_fraction=train.exploration_fraction,
     )
+
+
+def normalisation_path(model_path: Path) -> Path:
+    """Where the running reward statistics live for a given model file."""
+    return model_path.parent / "vec_normalize.pkl"
+
+
+def wrap_reward_normalisation(
+    config: AppConfig, vec_env: DummyVecEnv, resume: Path | None
+) -> DummyVecEnv | VecNormalize:
+    """Scale rewards by their running std for on-policy training.
+
+    The reward weights are hand-chosen magnitudes (+0.1 per step against -100
+    on death) and PPO shares one feature extractor between the actor and the
+    critic, so an un-normalised value loss in the tens drowns out a policy
+    gradient in the thousandths. Normalising keeps both objectives comparable.
+
+    Only observations would change what the policy sees, and those are left
+    alone (``norm_obs=False``), so evaluation needs no statistics file.
+    """
+    if not config.train.normalize_reward or config.train.algo != "ppo":
+        return vec_env
+    if resume is not None and normalisation_path(resume).exists():
+        print(f"Loading reward statistics from {normalisation_path(resume)}")
+        normalised = VecNormalize.load(str(normalisation_path(resume)), vec_env)
+        normalised.training = True
+        return normalised
+    return VecNormalize(
+        vec_env,
+        norm_obs=False,
+        norm_reward=True,
+        clip_reward=config.train.clip_reward,
+        gamma=config.train.gamma,
+    )
+
+
+def save_run(model, vec_env: DummyVecEnv | VecNormalize, path: Path) -> None:
+    """Save the policy, plus the reward statistics needed to resume cleanly."""
+    model.save(path)
+    if isinstance(vec_env, VecNormalize):
+        vec_env.save(str(normalisation_path(path)))
 
 
 def install_interrupt_handler() -> None:
@@ -209,7 +257,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     # Monitor records episode return/length, which is what shows up as
     # rollout/ep_rew_mean in the logs -- the number to watch while training.
+    # It sits inside VecNormalize, so those numbers stay in raw reward units.
     vec_env = DummyVecEnv([lambda: Monitor(env, filename=str(log_dir / "monitor.csv"))])
+    vec_env = wrap_reward_normalisation(config, vec_env, args.resume)
 
     if args.resume:
         algo_cls = ALGOS[config.train.algo]
@@ -234,10 +284,10 @@ def main(argv: list[str] | None = None) -> int:
             tb_log_name=run_name,
             progress_bar=False,
         )
-        model.save(model_dir / "final")
+        save_run(model, vec_env, model_dir / "final")
         print(f"Training finished. Saved {model_dir / 'final.zip'}")
     except KeyboardInterrupt:
-        model.save(model_dir / "interrupted")
+        save_run(model, vec_env, model_dir / "interrupted")
         print(f"\nInterrupted. Saved {model_dir / 'interrupted.zip'}")
         status = 130
     finally:
