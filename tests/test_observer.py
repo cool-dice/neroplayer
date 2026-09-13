@@ -14,6 +14,7 @@ from ai_player.observer import (
     build_game_over_detector,
     build_score_signal,
 )
+from ai_player.perception import crop_region
 
 
 @pytest.fixture
@@ -44,7 +45,7 @@ def test_colour_detector_separates_play_from_game_over(reward):
 
 
 def test_template_detector_matches_saved_banner(tmp_path, reward):
-    banner = reward.game_over_region.crop(game_over_frame())
+    banner = crop_region(game_over_frame(), reward.game_over_region)
     template_path = tmp_path / "game_over.png"
     cv2.imwrite(str(template_path), cv2.cvtColor(banner, cv2.COLOR_BGR2GRAY))
     reward.game_over_template = str(template_path)

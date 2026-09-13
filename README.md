@@ -58,15 +58,16 @@ Python 3.10+.
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate          # Windows
+.venv\Scripts\activate               # Windows
+source .venv/bin/activate            # Linux / macOS
 pip install -r requirements.txt
 ```
 
 Notes:
 
-- `pydirectinput` is Windows-only (it is skipped by an environment marker
-  elsewhere). Everything except real key injection works on Linux/macOS, which
-  is enough for `--mock` runs and the test suite.
+- `pydirectinput` is Windows-only, so `requirements.txt` installs it only
+  there. Everything except real key injection works on Linux/macOS, which is
+  enough for `--mock` runs and the test suite.
 - Score OCR needs the [Tesseract binary](https://github.com/UB-Mannheim/tesseract/wiki)
   on `PATH`. Without it the observer automatically falls back to the
   pixel-signature score detector and warns once.
@@ -95,7 +96,7 @@ Two 150k-step PPO runs (identical seed, 84×84 frames + mel spectrogram,
 | normalised rewards (default) | 20.2 steps | 41.2 steps | 42.5 steps, 2.5 points |
 
 Both runs are flat for the first ~50k steps and then diverge sharply, which is
-what the reward-scale argument above predicts. Neither agent has mastered the
+what the reward-scale argument below predicts. Neither agent has mastered the
 game — pixel-based control needs millions of steps for that, and the simulator
 exists to validate the pipeline rather than to serve as a benchmark — but the
 plumbing clearly produces a learning signal the policy can exploit.
@@ -215,7 +216,7 @@ reward = step_reward                    # +0.1 survival drip, dense signal
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest        # 54 tests, ~11s, no display or sound card needed
+python -m pytest        # 56 tests, ~11s, no display or sound card needed
 python -m ruff check .
 ```
 

@@ -27,7 +27,12 @@ LOGS_DIR = PROJECT_ROOT / "logs"
 
 @dataclass
 class Region:
-    """An axis-aligned screen rectangle, in absolute desktop pixels."""
+    """An axis-aligned rectangle in pixels.
+
+    Used both for the capture region (absolute desktop coordinates) and for
+    sub-regions such as the score box, which are relative to the captured
+    frame's own origin. ``perception.crop_region`` slices frames with it.
+    """
 
     left: int
     top: int
@@ -42,15 +47,6 @@ class Region:
             "width": self.width,
             "height": self.height,
         }
-
-    def crop(self, image: Any) -> Any:
-        """Slice this region out of a frame that was captured *relative* to it.
-
-        Sub-regions (score box, game-over banner) are stored relative to the
-        capture region's origin, so cropping ignores ``left``/``top`` offsets of
-        the parent and uses these values directly as in-frame coordinates.
-        """
-        return image[self.top : self.top + self.height, self.left : self.left + self.width]
 
 
 @dataclass
