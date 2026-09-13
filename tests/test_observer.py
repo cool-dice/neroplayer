@@ -173,6 +173,27 @@ def test_pixel_score_signal_fires_once_per_scoring_frame(reward):
     assert mismatches == 0
 
 
+def test_pixel_score_signal_handles_a_dark_on_light_hud(reward):
+    """Inverting the HUD must not change what counts as glyph ink."""
+
+    def inverted(game: MockArcadeGame) -> np.ndarray:
+        frame = game.render()
+        box = reward.score_region
+        patch = frame[box.top : box.top + box.height, box.left : box.left + box.width]
+        frame[box.top : box.top + box.height, box.left : box.left + box.width] = 255 - patch
+        return frame
+
+    signal = PixelChangeScoreSignal(reward)
+    game = MockArcadeGame(seed=4)
+    game.score = 5
+    signal.update(inverted(game))
+
+    game.score = 6
+    points, _ = signal.update(inverted(game))
+
+    assert points == 1.0
+
+
 def test_build_score_signal_rejects_unknown_mode(reward):
     reward.score_mode = "telepathy"
 

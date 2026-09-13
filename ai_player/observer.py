@@ -156,12 +156,21 @@ class ScoreSignal(Protocol):
 
 
 def _binarise_score_box(frame: BGRFrame, reward: RewardConfig) -> np.ndarray:
-    """Crop the score box and threshold it to a clean black-on-white mask."""
+    """Crop the score box and threshold it so the digits are always white.
+
+    HUDs come in both polarities -- light digits on a dark playfield, dark
+    digits on a light panel -- and everything downstream (the OCR inversion,
+    the ink-relative change ratio) assumes the glyphs are the non-zero pixels.
+    Digits never fill most of their box, so whichever class is in the minority
+    is the ink; normalising here means callers never have to care.
+    """
     patch = crop_region(frame, reward.score_region)
     if patch.size == 0:
         return np.zeros((1, 1), dtype=np.uint8)
     gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY) if patch.ndim == 3 else patch
     _, mask = cv2.threshold(gray, reward.score_threshold, 255, cv2.THRESH_BINARY)
+    if np.count_nonzero(mask) * 2 > mask.size:
+        mask = cv2.bitwise_not(mask)
     return mask
 
 
@@ -202,8 +211,9 @@ class OcrScoreSignal:
         mask = _binarise_score_box(frame, self._reward)
         if mask.size <= 1:
             return None
-        # Tesseract expects dark glyphs on a light background, and is far more
-        # reliable when the text is at least ~30 px tall.
+        # The mask always carries white glyphs; Tesseract expects dark glyphs on
+        # a light background, and is far more reliable when the text is at least
+        # ~30 px tall.
         mask = cv2.bitwise_not(mask)
         if mask.shape[0] < 32:
             scale = 32 / mask.shape[0]
