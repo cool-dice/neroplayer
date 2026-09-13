@@ -86,9 +86,7 @@ class ScreenCapture:
         """Grayscale + resize a BGR frame to the agent's input resolution."""
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         # INTER_AREA is the least aliasing-prone choice when shrinking.
-        return cv2.resize(
-            gray, (self.cfg.frame_width, self.cfg.frame_height), interpolation=cv2.INTER_AREA
-        )
+        return cv2.resize(gray, (self.cfg.frame_width, self.cfg.frame_height), interpolation=cv2.INTER_AREA)
 
     def reset(self) -> np.ndarray:
         """Fill the frame stack with the current frame and return the observation."""
@@ -104,8 +102,10 @@ class ScreenCapture:
             frame = self.preprocess(self.grab_raw())
         except Exception:  # pragma: no cover - hardware dependent
             logger.exception("Screen capture failed; repeating last frame")
-            frame = self._frames[-1] if self._frames else np.zeros(
-                (self.cfg.frame_height, self.cfg.frame_width), dtype=np.uint8
+            frame = (
+                self._frames[-1]
+                if self._frames
+                else np.zeros((self.cfg.frame_height, self.cfg.frame_width), dtype=np.uint8)
             )
         self._frames.append(frame)
         return self._stacked()
@@ -141,8 +141,14 @@ class AudioCapture:
             self._start()
 
     @property
-    def observation_shape(self) -> tuple[int, int]:
+    def spectrogram_shape(self) -> tuple[int, int]:
         return (self.cfg.n_mels, self.cfg.n_frames)
+
+    @property
+    def observation_shape(self) -> tuple[int]:
+        # Delivered flattened: SB3's CombinedExtractor feeds non-image Boxes
+        # through an MLP anyway, and a 1-D vector avoids env-checker warnings.
+        return (self.cfg.n_mels * self.cfg.n_frames,)
 
     # -- lifecycle -------------------------------------------------------- #
     def _start(self) -> None:
@@ -171,7 +177,7 @@ class AudioCapture:
                     mono = data.mean(axis=1).astype(np.float32)
                     with self._lock:
                         self._buffer = np.roll(self._buffer, -len(mono))
-                        self._buffer[-len(mono):] = mono
+                        self._buffer[-len(mono) :] = mono
         except Exception:
             logger.exception("Audio recorder thread died; audio observation frozen")
             self.available = False
@@ -189,19 +195,19 @@ class AudioCapture:
         return self.observe()
 
     def observe(self) -> np.ndarray:
-        """Return the log-mel spectrogram of the trailing window, scaled to [0, 1]."""
+        """Return the flattened log-mel spectrogram of the trailing window, scaled to [0, 1]."""
         with self._lock:
             window = self._buffer.copy()
         if not self.available:
             return np.zeros(self.observation_shape, dtype=np.float32)
         try:
-            return self.spectrogram(window)
+            return self.spectrogram(window).reshape(-1)
         except Exception:  # pragma: no cover
             logger.exception("Spectrogram computation failed")
             return np.zeros(self.observation_shape, dtype=np.float32)
 
     def spectrogram(self, samples: np.ndarray) -> np.ndarray:
-        """Compute the normalised log-mel spectrogram of a 1-D float32 signal."""
+        """Compute the normalised log-mel spectrogram ``(n_mels, n_frames)`` of a 1-D signal."""
         import librosa  # heavy import; only needed when audio is live
 
         mel = librosa.feature.melspectrogram(

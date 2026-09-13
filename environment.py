@@ -11,7 +11,8 @@ now. Consequences for RL:
 
 Observation (``gymnasium.spaces.Dict``):
     ``image``: ``uint8`` array ``(frame_stack, H, W)`` of grayscale frames.
-    ``audio``: ``float32`` array ``(n_mels, n_frames)`` log-mel spectrogram in [0, 1].
+    ``audio``: ``float32`` vector ``(n_mels * n_frames,)``, a flattened log-mel
+    spectrogram in [0, 1].
 
 Action (``gymnasium.spaces.Discrete``): index into ``ControlConfig.actions``.
 """

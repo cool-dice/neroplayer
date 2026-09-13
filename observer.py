@@ -187,9 +187,7 @@ class GameObserver:
         if binary.mean() < 127:  # ensure dark text on light background
             binary = cv2.bitwise_not(binary)
         try:
-            text = self._ocr.image_to_string(
-                binary, config="--psm 7 -c tessedit_char_whitelist=0123456789"
-            )
+            text = self._ocr.image_to_string(binary, config="--psm 7 -c tessedit_char_whitelist=0123456789")
         except Exception:  # pragma: no cover - external binary
             logger.exception("OCR failed; disabling OCR for this run")
             self._ocr = None

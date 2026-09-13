@@ -39,7 +39,9 @@ ALGORITHMS: dict[str, type[BaseAlgorithm]] = {"ppo": PPO, "dqn": DQN}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--algo", choices=ALGORITHMS, default=CONFIG.train.algorithm)
     parser.add_argument("--timesteps", type=int, default=CONFIG.train.total_timesteps)
     parser.add_argument("--model-name", default=CONFIG.train.model_name)

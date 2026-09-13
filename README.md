@@ -9,7 +9,7 @@ game-specific API.
  ┌──────────────┐   mss + cv2    ┌─────────────┐
  │  Game window │ ─────────────► │ perception  │──► image  (4 x 84 x 84 uint8)
  │              │  soundcard +   │             │──► audio  (32 x 11 log-mel)
- │              │  librosa       └─────────────┘            │
+ │              │  librosa       └─────────────┘  flattened  │
  │              │                ┌─────────────┐            ▼
  │              │ ◄───────────── │  controls   │ ◄─── PPO / DQN (Stable-Baselines3)
  │              │ pydirectinput  └─────────────┘            ▲
@@ -100,9 +100,10 @@ For GPU training replace the `torch` line with the CUDA wheel from
 
 * **Observation.** Four consecutive 84x84 grayscale frames are stacked so the
   policy can infer motion from a single observation (the classic Atari trick).
-  A 0.25 s log-mel spectrogram of the system audio is attached as a second
-  modality; SB3's `CombinedExtractor` sends the image through a NatureCNN and
-  flattens the spectrogram into an MLP branch, then concatenates both.
+  A 0.25 s log-mel spectrogram (32 mel bands x 11 frames, flattened to a
+  352-vector) of the system audio is attached as a second modality; SB3's
+  `CombinedExtractor` sends the image through a NatureCNN and the spectrogram
+  through an MLP branch, then concatenates both.
 * **Action.** `Discrete(len(actions))`. Each action is a short key *tap*
   (`key_hold_seconds`), including an explicit no-op so the agent can learn to
   wait.

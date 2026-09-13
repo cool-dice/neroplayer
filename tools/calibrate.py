@@ -42,7 +42,9 @@ def annotate(frame):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--template", action="store_true", help="Save game_over_region crop as the template")
     parser.add_argument("--live", action="store_true", help="Show the downscaled agent view in a window")
     parser.add_argument("--delay", type=float, default=2.0, help="Seconds to wait before capturing")
@@ -71,7 +73,9 @@ def main() -> int:
         while True:
             t0 = time.perf_counter()
             small = screen.preprocess(screen.grab_raw())
-            cv2.imshow("agent view (84x84 upscaled)", cv2.resize(small, (336, 336), interpolation=cv2.INTER_NEAREST))
+            cv2.imshow(
+                "agent view (84x84 upscaled)", cv2.resize(small, (336, 336), interpolation=cv2.INTER_NEAREST)
+            )
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
             time.sleep(max(0.0, period - (time.perf_counter() - t0)))

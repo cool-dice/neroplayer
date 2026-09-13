@@ -23,7 +23,9 @@ logger = logging.getLogger("play")
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", type=Path, default=CONFIG.train.model_dir / f"{CONFIG.train.model_name}.zip")
+    parser.add_argument(
+        "--model", type=Path, default=CONFIG.train.model_dir / f"{CONFIG.train.model_name}.zip"
+    )
     parser.add_argument("--algo", choices=("ppo", "dqn"), default=CONFIG.train.algorithm)
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of argmax")

@@ -1,24 +1,26 @@
+# Python 3.10+ (64-bit Windows recommended)
+
 # Core RL
-gymnasium>=0.29,<1.2
-stable-baselines3>=2.3,<3.0
+gymnasium==1.3.0
+stable-baselines3==2.9.0
 torch>=2.1            # CPU build is fine for the MVP; install a CUDA build for speed
 numpy>=1.24,<3.0
 
 # Vision
-mss>=9.0
-opencv-python>=4.8
+mss==10.2.0
+opencv-python==5.0.0.93
 
 # Audio (system loopback capture + spectrograms)
-soundcard>=0.4.3
-librosa>=0.10
+soundcard==0.4.6
+librosa==1.0.0
 soundfile>=0.12       # librosa backend
 
 # Controls (Windows only: uses SendInput via ctypes)
-pydirectinput>=1.0.4
+pydirectinput==1.0.4
 
 # Optional: score OCR. Also requires the Tesseract binary on PATH:
 # https://github.com/UB-Mannheim/tesseract/wiki
 pytesseract>=0.3.10
 
 # Logging / monitoring
-tensorboard>=2.14
+tensorboard>=2.20,<3
