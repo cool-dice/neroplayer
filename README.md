@@ -139,3 +139,12 @@ instances, so the whole loop can be exercised with synthetic frames and a
 dry-run controller on any OS. `python train.py --dry-run --no-audio --check-env`
 runs the SB3 environment checker against whatever is on screen without sending
 a single keystroke.
+
+The test suite drives the environment with a scripted fake game (score flips,
+game-over banner) and runs a few PPO updates through the `MultiInputPolicy`:
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+ruff check . && ruff format --check .
+```
