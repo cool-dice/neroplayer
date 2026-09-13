@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Training artefacts
+models/
+logs/
+*.zip
+
+# Calibration screenshots (keep templates, drop scratch captures)
+assets/captures/
