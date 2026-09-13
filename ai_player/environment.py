@@ -77,6 +77,9 @@ class GameEnv(gym.Env):
         self._audio = audio_source or build_audio_source(self.config.audio)
         self._controller = controller or build_controller(self.config.control)
         self._observer = observer or GameObserver(self.config.reward)
+        # Idempotent: build_audio_source already started the recorder it built,
+        # but an injected source may not be running yet.
+        self._audio.start()
 
         self._processor = FrameProcessor(self.config.vision)
         self._stack = FrameStack(self.config.vision)

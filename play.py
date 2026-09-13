@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 from stable_baselines3 import DQN, PPO
 
 from ai_player.config import AppConfig, load_config
@@ -44,6 +45,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fps", type=float, default=None, help="Override the agent decision rate")
     parser.add_argument("--countdown", type=int, default=0, help="Seconds to wait before starting")
     return parser.parse_args(argv)
+
+
+class Recorder:
+    """Optional video writer, sized from the first frame it is given.
+
+    Taking the size from the frame rather than the config avoids a silent
+    mismatch: ``--mock`` replaces the capture region, so the configured
+    dimensions are not necessarily the ones being captured.
+    """
+
+    def __init__(self, path: Path | None, fps: float) -> None:
+        self._path = path
+        self._fps = fps
+        self._writer: cv2.VideoWriter | None = None
+
+    def write(self, frame: np.ndarray | None) -> None:
+        if self._path is None or frame is None:
+            return
+        if self._writer is None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            height, width = frame.shape[:2]
+            self._writer = cv2.VideoWriter(
+                str(self._path),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                self._fps,
+                (width, height),
+            )
+        self._writer.write(frame)
+
+    def close(self) -> None:
+        if self._writer is not None:
+            self._writer.release()
+            self._writer = None
+            print(f"Recorded {self._path}")
 
 
 def resolve_config(args: argparse.Namespace) -> AppConfig:
@@ -77,16 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     env = make_env(config, mock=args.mock, render_mode="human" if args.render else None, seed=0)
     model = ALGOS[config.train.algo].load(args.model, device=config.train.device)
 
-    writer = None
-    if args.record is not None:
-        args.record.parent.mkdir(parents=True, exist_ok=True)
-        region = config.capture.region
-        writer = cv2.VideoWriter(
-            str(args.record),
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            config.env.target_fps or 10.0,
-            (region.width, region.height),
-        )
+    recorder = Recorder(args.record, env.config.env.target_fps or 10.0)
 
     returns: list[float] = []
     lengths: list[int] = []
@@ -102,8 +128,7 @@ def main(argv: list[str] | None = None) -> int:
                 total += reward
                 steps += 1
                 done = terminated or truncated
-                if writer is not None and (frame := env.last_frame) is not None:
-                    writer.write(frame)
+                recorder.write(env.last_frame)
             returns.append(total)
             lengths.append(steps)
             points.append(float(info.get("episode_points", 0.0)))
@@ -113,9 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
-        if writer is not None:
-            writer.release()
-            print(f"Recorded {args.record}")
+        recorder.close()
         env.close()
 
     if returns:
