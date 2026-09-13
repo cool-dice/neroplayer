@@ -156,9 +156,14 @@ class RewardConfig:
     # used; otherwise we fall back to the mean-colour check below.
     game_over_template: str | None = None
     template_threshold: float = 0.85
-    # Mean BGR colour of the game-over banner and the allowed L1 distance.
+    # Colour of the game-over banner, and how far a pixel may sit from it on
+    # *every* channel to still count as part of the banner.
     game_over_color_bgr: tuple[int, int, int] = (32, 32, 160)
     color_tolerance: float = 45.0
+    # Fraction of the region that must match that colour. Well above what any
+    # sprite drifting through the region can cover, and comfortably below a
+    # solid banner with text on it.
+    color_coverage: float = 0.6
     # Consecutive positive detections required before terminating. Debounces
     # single-frame flashes and screen transitions.
     detection_patience: int = 2

@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from ai_player.config import Region, RewardConfig
-from ai_player.mock_game import MockArcadeGame, mock_config
+from ai_player.mock_game import MockArcadeGame, build_mock_backends, mock_config
 from ai_player.observer import (
     ColorGameOverDetector,
     GameObserver,
@@ -42,6 +42,44 @@ def test_colour_detector_separates_play_from_game_over(reward):
     assert playing is False
     assert over is True
     assert over_conf > play_conf
+
+
+def test_colour_detector_ignores_sprites_crossing_the_region(reward):
+    """Regression: obstacles drifting through the ROI must not end the episode.
+
+    A mean-colour test fired on 7% of live gameplay frames here, because two
+    near-matching channels diluted the one that was far off.
+    """
+    detector = ColorGameOverDetector(reward)
+    game, frames, _audio, controller = build_mock_backends(mock_config(), seed=5)
+
+    alive_detections, banner_detections, banner_frames = 0, 0, 0
+    for episode in range(6):
+        game.seed(300 + episode)
+        for _ in range(120):
+            controller.act(2 if game.ticks % 3 else 0)
+            fired, _confidence = detector.detect(frames.grab())
+            if game.game_over:
+                banner_frames += 1
+                banner_detections += int(fired)
+                controller.restart()
+            else:
+                alive_detections += int(fired)
+
+    assert alive_detections == 0
+    assert banner_frames > 0
+    assert banner_detections == banner_frames
+
+
+def test_colour_detector_confidence_is_banner_coverage(reward):
+    detector = ColorGameOverDetector(reward)
+
+    _fired, playing = detector.detect(playing_frame())
+    _fired, banner = detector.detect(game_over_frame())
+
+    assert playing < 0.1
+    # The banner carries white "GAME OVER" text, so coverage is high, not 1.0.
+    assert 0.8 < banner <= 1.0
 
 
 def test_template_detector_matches_saved_banner(tmp_path, reward):

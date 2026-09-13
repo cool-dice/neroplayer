@@ -4,9 +4,10 @@ A game running behind a window exposes no API, so the reward function has to be
 *inferred from pixels*. This module implements that inference:
 
 * **Termination** -- ``cv2.matchTemplate`` against a saved crop of the
-  game-over screen, or a mean-colour check on a fixed region when no template
-  is available. Detections are debounced over consecutive frames because a
-  single-frame false positive would end the episode and poison the return.
+  game-over screen, or a banner-colour coverage check on a fixed region when no
+  template is available. Detections are debounced over consecutive frames
+  because a single-frame false positive would end the episode and poison the
+  return.
 * **Scoring** -- OCR of the score box with Tesseract when installed, otherwise
   a pixel-signature detector that rewards *changes* in the score box without
   needing to read the digits.
@@ -81,28 +82,35 @@ class TemplateGameOverDetector:
 
 
 class ColorGameOverDetector:
-    """Mean-colour check on a fixed region.
+    """Solid-colour coverage check on a fixed region.
 
-    Cheapest possible detector: most games dim the playfield or show a solid
-    banner on death, which moves the mean BGR of the centre region far enough
-    to be unambiguous.
+    Most games paint a banner or dim the playfield on death, so the test is
+    "what fraction of this region is the game-over colour?".
+
+    Deliberately *not* a mean-colour test. Averaging the region first, then
+    averaging the per-channel distances, lets one badly mismatched channel be
+    diluted by two close ones: on the bundled game a handful of red obstacles
+    drifting through the region pulled the mean close enough to the dark-red
+    banner to fire on 7% of ordinary gameplay frames, ending episodes that were
+    still alive and charging the agent the full death penalty. Counting pixels
+    that match on *every* channel cannot be fooled that way, because sprites
+    never cover most of the region.
     """
 
     def __init__(self, reward: RewardConfig) -> None:
         self._reward = reward
-        self._target = np.asarray(reward.game_over_color_bgr, dtype=np.float32)
+        self._target = np.asarray(reward.game_over_color_bgr, dtype=np.int16)
 
     def detect(self, frame: BGRFrame) -> tuple[bool, float]:
         patch = crop_region(frame, self._reward.game_over_region)
         if patch.size == 0:
             return False, 0.0
-        mean = patch.reshape(-1, patch.shape[-1]).mean(axis=0).astype(np.float32)
-        distance = float(np.abs(mean - self._target).mean())
-        tolerance = max(self._reward.color_tolerance, 1e-6)
-        # Map distance onto a 0..1 confidence so logs are comparable with the
-        # template detector's correlation score.
-        confidence = max(0.0, 1.0 - distance / tolerance)
-        return distance <= self._reward.color_tolerance, confidence
+        distance = np.abs(patch.astype(np.int16) - self._target)
+        matching = distance.max(axis=2) <= self._reward.color_tolerance
+        # Coverage doubles as the confidence score, which keeps logs comparable
+        # with the template detector's correlation value.
+        coverage = float(matching.mean())
+        return coverage >= self._reward.color_coverage, coverage
 
 
 def build_game_over_detector(reward: RewardConfig) -> GameOverDetector:

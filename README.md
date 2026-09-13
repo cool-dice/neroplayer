@@ -40,7 +40,7 @@ python train.py --mock --timesteps 20000      # trains against the simulator
 | `ai_player/config.py` | Every tunable: capture region, 84×84 frame size, target FPS, audio window, key map, reward weights. Serialises to JSON. |
 | `ai_player/perception.py` | `mss` screen capture, OpenCV grayscale/downscale/frame-stacking, `soundcard` loopback recording, `librosa` mel-spectrogram features. |
 | `ai_player/controls.py` | `pydirectinput` keyboard driver (tap or hold), restart sequences, guaranteed key release. |
-| `ai_player/observer.py` | The critic. Detects game over (`cv2.matchTemplate` or a mean-colour check) and score gains (Tesseract OCR or a pixel-signature fallback), then shapes the reward. |
+| `ai_player/observer.py` | The critic. Detects game over (`cv2.matchTemplate` or a banner-colour coverage check) and score gains (Tesseract OCR or a pixel-signature fallback), then shapes the reward. |
 | `ai_player/environment.py` | The `gymnasium.Env`: Dict observation space (image + audio), `Discrete` actions, fixed-rate stepping, episode resets. |
 | `ai_player/policies.py` | `MultiModalExtractor`: CNN branch + audio MLP branch → fused feature vector for SB3. |
 | `ai_player/mock_game.py` | A three-lane dodger rendered with OpenCV, plus drop-in capture/audio/control backends. Used by `--mock` and the tests. |
@@ -194,9 +194,15 @@ reward = step_reward                    # +0.1 survival drip, dense signal
   repaint moves under 1% of a generous score box but a large share of its ink,
   and a box-relative threshold drops most increments. It still undercounts
   when a game awards several points in one frame, which is what OCR is for.
-- **Termination** is debounced over `detection_patience` consecutive frames.
-  A one-frame false positive would end the episode and poison the return, so
-  this matters more than it looks.
+- **Termination** without a template asks "what fraction of the game-over
+  region is the banner colour?", requiring a match on every channel. The
+  obvious alternative — compare the region's *mean* colour to the banner —
+  looks equivalent and is not: two near-matching channels dilute the one that
+  is far off, and red obstacles drifting through the region ended 7% of live
+  gameplay frames on the bundled game, each costing a full death penalty.
+- **Termination is also debounced** over `detection_patience` consecutive
+  frames. A one-frame false positive would end the episode and poison the
+  return, so this matters more than it looks.
 
 ## Tuning that actually moves the needle
 
