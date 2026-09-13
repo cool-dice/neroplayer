@@ -194,12 +194,19 @@ reward = step_reward                    # +0.1 survival drip, dense signal
   repaint moves under 1% of a generous score box but a large share of its ink,
   and a box-relative threshold drops most increments. It still undercounts
   when a game awards several points in one frame, which is what OCR is for.
+  Either path thresholds the box so the digits are the non-zero pixels, so a
+  dark-on-light HUD reads the same as a light-on-dark one.
 - **Termination** without a template asks "what fraction of the game-over
   region is the banner colour?", requiring a match on every channel. The
   obvious alternative — compare the region's *mean* colour to the banner —
   looks equivalent and is not: two near-matching channels dilute the one that
   is far off, and red obstacles drifting through the region ended 7% of live
   gameplay frames on the bundled game, each costing a full death penalty.
+- **Template matching** uses normalised correlation, except when the saved
+  template has no variance at all. Correlation is undefined for a flat image:
+  OpenCV returns 0.0 for a perfect match on a solid colour block exactly as it
+  does for a total mismatch, so a banner calibrated that way could never fire.
+  Those templates are matched by squared difference instead.
 - **Termination is also debounced** over `detection_patience` consecutive
   frames. A one-frame false positive would end the episode and poison the
   return, so this matters more than it looks.
