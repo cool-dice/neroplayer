@@ -145,7 +145,9 @@ plumbing clearly produces a learning signal the policy can exploit.
 
 4. Set the key map in `config.json` if the defaults are wrong. `action_keys`
    maps action index → key, and `null` is the mandatory "do nothing" action.
-   **Simultaneous multi-key combos** are fully supported (e.g. running right while shooting or jumping):
+
+   **Automatic Combination Discovery (`auto_combos`)**:
+   Instead of hardcoding every possible combination manually, you only list your game's basic atomic keys (e.g. `["d", "a", "w", "s", "j", "space"]`) and enable `"auto_combos": true` (or `--auto-combos` CLI flag). The agent automatically generates the entire combination space up to `max_combo_size` (e.g. running + shooting `["d", "j"]`, jumping + shooting `["space", "j"]`, running + jumping `["d", "space"]`), and the RL policy learns via trial and error which combinations yield higher rewards:
 
    ```json
    "control": {
@@ -153,20 +155,21 @@ plumbing clearly produces a learning signal the policy can exploit.
        null,
        "d",
        "a",
-       "space",
+       "w",
+       "s",
        "j",
-       ["d", "space"],
-       ["d", "j"],
-       "d+space+j"
+       "space"
      ],
+     "auto_combos": true,
+     "max_combo_size": 2,
      "restart_keys": ["space"],
      "hold_keys": false
    }
    ```
 
    - Single keys: `"d"`, `"space"`, etc.
-   - Multi-key combos: `["d", "space"]` or `"d+space"` (both keys are pressed simultaneously).
-   - Use `hold_keys: true` for continuous movement (the keys stay down until the
+   - When `auto_combos: false`, you can still specify custom explicit combos: `["d", "space"]` or `"d+space"`.
+   - Use `hold_keys: true` for continuous movement (keys stay down until the
      agent picks a different action) and `false` for discrete inputs like jumping.
    - Test and verify all keys in your game window:
      ```bash

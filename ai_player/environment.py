@@ -28,7 +28,7 @@ import numpy as np
 from gymnasium import spaces
 
 from .config import AppConfig
-from .controls import ActionController, build_controller, format_action
+from .controls import ActionController, build_controller, format_action, get_effective_action_keys
 from .observer import GameObserver
 from .perception import (
     AudioFeatureExtractor,
@@ -95,7 +95,8 @@ class GameEnv(gym.Env):
                 low=0.0, high=1.0, shape=self.config.audio.observation_shape, dtype=np.float32
             )
         self.observation_space = spaces.Dict(obs_spaces)
-        self.action_space = spaces.Discrete(self.config.control.n_actions)
+        self._action_keys = get_effective_action_keys(self.config.control)
+        self.action_space = spaces.Discrete(len(self._action_keys))
 
         self._frame_period = 1.0 / self.config.env.target_fps if self.config.env.target_fps else 0.0
         self._next_frame_at = 0.0
@@ -223,7 +224,7 @@ class GameEnv(gym.Env):
         cv2.addWeighted(overlay, 0.75, out, 0.25, 0, out)
 
         action_idx = self._last_info.get("action")
-        keys = self.config.control.action_keys
+        keys = self._action_keys
         if action_idx is not None and 0 <= action_idx < len(keys):
             action_name = format_action(keys[action_idx])
             action_text = f"ACTIVE [{action_idx}]: [{action_name}]"
@@ -275,21 +276,32 @@ class GameEnv(gym.Env):
             cv2.LINE_AA,
         )
 
-        # Line 3: Configured Action Palette
+        # Line 3: Configured Action Palette (or preview window if many actions)
         chips = []
-        for i, raw_k in enumerate(keys):
+        # If there are many actions (e.g. combinatorial), show a window around the active action
+        if len(keys) <= 7:
+            palette_subset = list(enumerate(keys))
+            prefix = "ACTIONS: "
+        else:
+            cur = action_idx if action_idx is not None else 0
+            start_i = max(0, min(cur - 2, len(keys) - 5))
+            end_i = min(len(keys), start_i + 5)
+            palette_subset = list(enumerate(keys))[start_i:end_i]
+            prefix = f"ACTIONS ({len(keys)} total): "
+
+        for i, raw_k in palette_subset:
             name = format_action(raw_k)
             if i == action_idx:
                 chips.append(f">> [{i}:{name}] <<")
             else:
                 chips.append(f"[{i}:{name}]")
-        chips_str = "  ".join(chips)
+        chips_str = " ".join(chips)
         cv2.putText(
             out,
-            f"ACTIONS: {chips_str}",
+            f"{prefix}{chips_str}",
             (10, 64),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
+            0.42,
             (0, 255, 255),
             1,
             cv2.LINE_AA,

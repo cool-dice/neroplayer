@@ -38,6 +38,8 @@ def test_config_survives_a_json_round_trip(tmp_path):
     assert restored.reward.idle_penalty == -0.2
     assert restored.reward.movement_reward == 0.05
     assert restored.reward.idle_diff_threshold == 0.1
+    assert restored.control.auto_combos is False
+    assert restored.control.max_combo_size == 2
     assert restored.train.algo == "dqn"
 
 

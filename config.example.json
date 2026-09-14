@@ -33,6 +33,8 @@
     "restart_keys": [
       "space"
     ],
+    "auto_combos": true,
+    "max_combo_size": 2,
     "tap_duration": 0.02,
     "hold_keys": false,
     "pause_between_calls": 0.0,

@@ -7,6 +7,7 @@ from ai_player.controls import (
     KeyboardController,
     NullController,
     format_action,
+    get_effective_action_keys,
     parse_action_keys,
     validate_action_keys,
 )
@@ -108,3 +109,22 @@ def test_null_controller():
     controller.release_all()
     assert controller.history == [0, 1]
     assert controller.restarts == 1
+
+
+def test_auto_combos_generation():
+    control = ControlConfig(action_keys=["d", "space", "j"], auto_combos=True, max_combo_size=2)
+    combos = get_effective_action_keys(control)
+    # Expected: None (IDLE), ['d'], ['space'], ['j'], ['d', 'space'], ['d', 'j'], ['space', 'j']
+    assert None in combos
+    assert ["d"] in combos
+    assert ["space"] in combos
+    assert ["j"] in combos
+    assert ["d", "space"] in combos
+    assert ["d", "j"] in combos
+    assert ["space", "j"] in combos
+    assert len(combos) == 1 + 3 + 3  # 7 actions
+
+    val = validate_action_keys(control)
+    assert len(val) == 7
+    assert val[0]["formatted"] == "IDLE/NONE"
+

@@ -118,6 +118,10 @@ class ControlConfig:
     # order to *not* act -- without it every step would perturb the game.
     # Supports single keys ('d'), combos ('d+space' or ['d', 'space']), and None.
     action_keys: list[Any] = field(default_factory=lambda: ["up", "down", None])
+    # When auto_combos=True, generates all simultaneous combinations up to max_combo_size
+    # from available single keys, so the agent can learn and discover which combos work.
+    auto_combos: bool = False
+    max_combo_size: int = 2
     # Keys tapped on reset to start/restart a round (e.g. ["r"], ["enter"], ["space"]).
     restart_keys: list[Any] = field(default_factory=lambda: ["space"])
     # How long a key stays down for a single action. Keep it under one frame

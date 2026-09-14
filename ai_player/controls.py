@@ -12,6 +12,7 @@ backend so tests and the bundled mock game can plug in their own executor.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import time
 from typing import Any, Protocol, runtime_checkable
 
@@ -54,6 +55,34 @@ def format_action(key_spec: Any) -> str:
     return " + ".join(keys) if keys else "IDLE/NONE"
 
 
+def get_effective_action_keys(control: ControlConfig) -> list[Any]:
+    """Return the final list of action key specifications.
+
+    If `control.auto_combos` is True, extracts all atomic unique keys from `control.action_keys`
+    and generates the full powerset of combinations up to `control.max_combo_size`,
+    plus None (idle). This allows the RL agent to discover and learn any key combination.
+    """
+    if not control.auto_combos:
+        return list(control.action_keys)
+
+    # Extract distinct non-empty single keys
+    atomic_keys: list[str] = []
+    seen: set[str] = set()
+    for raw in control.action_keys:
+        for k in parse_action_keys(raw):
+            if k not in seen:
+                seen.add(k)
+                atomic_keys.append(k)
+
+    # Build combos: None (IDLE), then size 1..max_combo_size
+    combos: list[Any] = [None]
+    max_k = max(1, min(len(atomic_keys), control.max_combo_size))
+    for r in range(1, max_k + 1):
+        for c in itertools.combinations(atomic_keys, r):
+            combos.append(list(c))
+    return combos
+
+
 def validate_action_keys(control: ControlConfig) -> list[dict[str, Any]]:
     """Inspect all configured actions, expanding multi-key combos and checking validity."""
     valid_map: set[str] | None = None
@@ -65,8 +94,9 @@ def validate_action_keys(control: ControlConfig) -> list[dict[str, Any]]:
     except Exception:
         pass
 
+    effective_keys = get_effective_action_keys(control)
     results = []
-    for idx, raw in enumerate(control.action_keys):
+    for idx, raw in enumerate(effective_keys):
         keys = parse_action_keys(raw)
         formatted = format_action(raw)
         valid = True
@@ -113,6 +143,7 @@ class KeyboardController:
 
     def __init__(self, control: ControlConfig) -> None:
         self._config = control
+        self._action_keys = get_effective_action_keys(control)
         self._held_keys: set[str] = set()
         self._pdi = self._load_backend(control)
 
@@ -132,7 +163,7 @@ class KeyboardController:
         return pydirectinput
 
     def _keys_for(self, action: int) -> tuple[str, ...]:
-        keys = self._config.action_keys
+        keys = self._action_keys
         if not 0 <= action < len(keys):
             raise ValueError(f"Action {action} outside 0..{len(keys) - 1}")
         return parse_action_keys(keys[action])
@@ -190,7 +221,7 @@ class KeyboardController:
 
         # Best effort safety release of all known configured keys
         all_keys: set[str] = set()
-        for raw in self._config.action_keys:
+        for raw in self._action_keys:
             all_keys.update(parse_action_keys(raw))
         for raw in self._config.restart_keys:
             all_keys.update(parse_action_keys(raw))

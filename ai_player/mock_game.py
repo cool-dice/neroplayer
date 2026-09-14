@@ -23,7 +23,7 @@ import cv2
 import numpy as np
 
 from .config import AppConfig, Region
-from .controls import parse_action_keys
+from .controls import get_effective_action_keys, parse_action_keys
 from .perception import AudioConfig, AudioFeatureExtractor
 
 CANVAS_WIDTH = 320
@@ -347,7 +347,7 @@ def build_mock_backends(
         game,
         MockFrameSource(game),
         MockAudioSource(game, config.audio),
-        MockController(game, config.control.action_keys),
+        MockController(game, get_effective_action_keys(config.control)),
     )
 
 

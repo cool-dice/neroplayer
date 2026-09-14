@@ -90,6 +90,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Validate the environment against the Gymnasium/SB3 API and exit",
     )
     parser.add_argument(
+        "--auto-combos",
+        action="store_true",
+        help="Generate all simultaneous combinations up to --max-combo-size so agent discovers them",
+    )
+    parser.add_argument(
+        "--max-combo-size",
+        type=int,
+        default=None,
+        help="Maximum simultaneous keys in auto-generated combinations (default: 2)",
+    )
+    parser.add_argument(
         "--countdown",
         type=int,
         default=0,
@@ -121,6 +132,10 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.reward.movement_reward = args.movement_reward
     if args.idle_diff_threshold is not None:
         config.reward.idle_diff_threshold = args.idle_diff_threshold
+    if args.auto_combos:
+        config.control.auto_combos = True
+    if args.max_combo_size is not None:
+        config.control.max_combo_size = args.max_combo_size
     return config
 
 

@@ -62,6 +62,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--skip-template", action="store_true")
     parser.add_argument("--delay", type=float, default=2.0, help="Seconds to wait before --check")
+    parser.add_argument(
+        "--auto-combos",
+        action="store_true",
+        help="Generate combinations for key verification and testing",
+    )
     return parser.parse_args(argv)
 
 
@@ -321,6 +326,8 @@ def capture_template(args: argparse.Namespace, config: AppConfig) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     config = load_config(args.config)
+    if args.auto_combos:
+        config.control.auto_combos = True
     try:
         if args.check:
             return run_check(args, config)

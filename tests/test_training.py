@@ -157,6 +157,13 @@ def test_build_config_accepts_idle_and_movement_flags():
     assert cfg.reward.idle_diff_threshold == 0.08
 
 
+def test_build_config_accepts_auto_combos_flag():
+    args = train_script.parse_args(["--auto-combos", "--max-combo-size", "3"])
+    cfg = train_script.build_config(args)
+    assert cfg.control.auto_combos is True
+    assert cfg.control.max_combo_size == 3
+
+
 def test_main_runs_a_tiny_training_loop(tmp_path, monkeypatch):
     monkeypatch.setattr(train_script, "MODELS_DIR", tmp_path / "models")
     monkeypatch.setattr(train_script, "LOGS_DIR", tmp_path / "logs")
