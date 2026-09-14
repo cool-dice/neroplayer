@@ -26,6 +26,7 @@ import cv2
 import numpy as np
 
 from ai_player.config import CAPTURES_DIR, TEMPLATES_DIR, AppConfig, Region, load_config
+from ai_player.controls import build_controller, validate_action_keys
 from ai_player.observer import build_game_over_detector, build_score_signal
 from ai_player.perception import FrameProcessor, crop_region
 
@@ -44,6 +45,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     mode.add_argument(
         "--live", action="store_true", help="Preview the downscaled agent view (needs a display)"
+    )
+    mode.add_argument(
+        "--test-keys",
+        action="store_true",
+        help="Validate all configured keys and test pressing them in sequence",
     )
     parser.add_argument("--output", type=Path, default=Path("config.json"))
     parser.add_argument("--config", type=Path, default=None, help="Start from an existing config")
@@ -159,9 +165,56 @@ def run_check(args: argparse.Namespace, config: AppConfig) -> int:
     print(f"Score reader          : {type(signal).__name__}")
     print(f"Score read            : {score if score is not None else 'n/a'}")
     print(f"Points in the last 1s : {points}")
+
+    actions = validate_action_keys(config.control)
+    print(f"\nConfigured actions ({len(actions)} total):")
+    for a in actions:
+        status = "OK" if a["valid"] else f"WARN: {', '.join(a['warnings'])}"
+        keys_str = str(a["keys"] or "None")
+        print(f"  [{a['index']}] {a['formatted']:<18} -> {keys_str:<15} [{status}]")
+
     print(
         "\nIf the boxes in the screenshot do not line up, re-run `python calibrate.py` and drag them again."
     )
+    return 0
+
+
+def run_test_keys(config: AppConfig) -> int:
+    """Validate all configured action keys and simulate keypresses in sequence."""
+    actions = validate_action_keys(config.control)
+    print("\n" + "=" * 60)
+    print("CONFIGURED ACTIONS & KEY VERIFICATION:")
+    print("=" * 60)
+    for a in actions:
+        status = "OK" if a["valid"] else f"WARN: {', '.join(a['warnings'])}"
+        keys_str = str(a["keys"] or "None")
+        print(f"  [{a['index']}] {a['formatted']:<20} -> {keys_str:<15} [{status}]")
+    print("=" * 60)
+
+    try:
+        controller = build_controller(config.control, dry_run=False)
+    except Exception as exc:
+        print(f"\nNote: Live key testing requires Windows and pydirectinput ({exc}).")
+        return 0
+
+    print("\nStarting live key test in 3 seconds -- focus your game window!")
+    for sec in range(3, 0, -1):
+        print(f"  {sec}...", flush=True)
+        time.sleep(1.0)
+
+    print("\nTesting actions in sequence (observe your character):")
+    for a in actions:
+        keys = a["keys"]
+        if not keys:
+            print(f"  Action {a['index']}: IDLE (wait 1.0s)...")
+            time.sleep(1.0)
+            continue
+        print(f"  Action {a['index']}: Executing [{a['formatted']}]...")
+        controller.act(a["index"])
+        time.sleep(1.0)
+
+    controller.release_all()
+    print("\nKey testing complete! All configured actions executed.")
     return 0
 
 
@@ -273,6 +326,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_check(args, config)
         if args.live:
             return run_live(config)
+        if args.test_keys:
+            return run_test_keys(config)
         return run_pick(args, config)
     except RuntimeError as exc:
         print(exc)

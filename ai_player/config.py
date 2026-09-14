@@ -116,9 +116,10 @@ class ControlConfig:
 
     # Index == action id. ``None`` is an explicit no-op, which the agent needs in
     # order to *not* act -- without it every step would perturb the game.
-    action_keys: list[str | None] = field(default_factory=lambda: ["up", "down", None])
-    # Keys tapped on reset to start/restart a round (e.g. ["r"], ["enter"]).
-    restart_keys: list[str] = field(default_factory=lambda: ["space"])
+    # Supports single keys ('d'), combos ('d+space' or ['d', 'space']), and None.
+    action_keys: list[Any] = field(default_factory=lambda: ["up", "down", None])
+    # Keys tapped on reset to start/restart a round (e.g. ["r"], ["enter"], ["space"]).
+    restart_keys: list[Any] = field(default_factory=lambda: ["space"])
     # How long a key stays down for a single action. Keep it under one frame
     # period so actions do not bleed into the next step.
     tap_duration: float = 0.02

@@ -11,10 +11,82 @@ backend so tests and the bundled mock game can plug in their own executor.
 
 from __future__ import annotations
 
+import contextlib
 import time
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from .config import ControlConfig
+
+
+def parse_action_keys(key_spec: Any) -> tuple[str, ...]:
+    """Normalize action key specification into a tuple of key names.
+
+    Supports:
+    - None -> ()
+    - "d" -> ("d",)
+    - "d+space" -> ("d", "space")
+    - ["d", "space"] -> ("d", "space")
+    """
+    if key_spec is None:
+        return ()
+    if isinstance(key_spec, str):
+        if "+" in key_spec:
+            return tuple(k.strip() for k in key_spec.split("+") if k.strip())
+        cleaned = key_spec.strip()
+        return (cleaned,) if cleaned else ()
+    if isinstance(key_spec, (list, tuple)):
+        result: list[str] = []
+        for item in key_spec:
+            if item is None:
+                continue
+            s = str(item).strip()
+            if "+" in s:
+                result.extend(k.strip() for k in s.split("+") if k.strip())
+            elif s:
+                result.append(s)
+        return tuple(result)
+    return (str(key_spec).strip(),)
+
+
+def format_action(key_spec: Any) -> str:
+    """Format key spec for user display, logs, and HUD."""
+    keys = parse_action_keys(key_spec)
+    return " + ".join(keys) if keys else "IDLE/NONE"
+
+
+def validate_action_keys(control: ControlConfig) -> list[dict[str, Any]]:
+    """Inspect all configured actions, expanding multi-key combos and checking validity."""
+    valid_map: set[str] | None = None
+    try:
+        import pydirectinput
+
+        if hasattr(pydirectinput, "KEYBOARD_MAPPING"):
+            valid_map = set(pydirectinput.KEYBOARD_MAPPING.keys())
+    except Exception:
+        pass
+
+    results = []
+    for idx, raw in enumerate(control.action_keys):
+        keys = parse_action_keys(raw)
+        formatted = format_action(raw)
+        valid = True
+        warnings = []
+        if valid_map is not None:
+            for k in keys:
+                if k.lower() not in valid_map:
+                    valid = False
+                    warnings.append(f"Key '{k}' not found in pydirectinput mappings")
+        results.append(
+            {
+                "index": idx,
+                "raw": raw,
+                "keys": keys,
+                "formatted": formatted,
+                "valid": valid,
+                "warnings": warnings,
+            }
+        )
+    return results
 
 
 @runtime_checkable
@@ -29,19 +101,19 @@ class ActionController(Protocol):
 
 
 class KeyboardController:
-    """``pydirectinput`` backed keyboard driver.
+    """``pydirectinput`` backed keyboard driver supporting single and multi-key actions.
 
     Two modes:
 
     * **tap** (default) -- press and release within a few milliseconds. Correct
       for discrete inputs like jump/flap/rotate.
-    * **hold** -- keep the chosen key down until a different action arrives.
+    * **hold** -- keep the chosen key(s) down until a different action arrives.
       Correct for continuous movement, where re-tapping would stutter.
     """
 
     def __init__(self, control: ControlConfig) -> None:
         self._config = control
-        self._held_key: str | None = None
+        self._held_keys: set[str] = set()
         self._pdi = self._load_backend(control)
 
     @staticmethod
@@ -59,48 +131,72 @@ class KeyboardController:
         pydirectinput.FAILSAFE = control.fail_safe
         return pydirectinput
 
-    def act(self, action: int) -> None:
-        """Execute the key bound to ``action`` (no-op actions do nothing)."""
-        key = self._key_for(action)
-        if self._config.hold_keys:
-            self._apply_hold(key)
-            return
-        if key is None:
-            return
-        self._pdi.keyDown(key)
-        time.sleep(self._config.tap_duration)
-        self._pdi.keyUp(key)
+    def _keys_for(self, action: int) -> tuple[str, ...]:
+        keys = self._config.action_keys
+        if not 0 <= action < len(keys):
+            raise ValueError(f"Action {action} outside 0..{len(keys) - 1}")
+        return parse_action_keys(keys[action])
 
-    def _apply_hold(self, key: str | None) -> None:
-        if key == self._held_key:
+    def act(self, action: int) -> None:
+        """Execute the key(s) bound to ``action`` simultaneously; empty tuple is a no-op."""
+        keys = self._keys_for(action)
+        if self._config.hold_keys:
+            self._apply_hold(keys)
             return
-        if self._held_key is not None:
-            self._pdi.keyUp(self._held_key)
-        if key is not None:
+        if not keys:
+            return
+        backend = self._pdi
+        for key in keys:
+            backend.keyDown(key)
+        try:
+            time.sleep(self._config.tap_duration)
+        finally:
+            for key in reversed(keys):
+                backend.keyUp(key)
+
+    def _apply_hold(self, keys: tuple[str, ...]) -> None:
+        target = set(keys)
+        if target == self._held_keys:
+            return
+        to_release = self._held_keys - target
+        to_press = target - self._held_keys
+        for key in to_release:
+            self._pdi.keyUp(key)
+        for key in to_press:
             self._pdi.keyDown(key)
-        self._held_key = key
+        self._held_keys = target
 
     def restart(self) -> None:
         """Tap the configured restart keys in order to begin a new round."""
         self.release_all()
-        for key in self._config.restart_keys:
-            self._pdi.keyDown(key)
+        for raw in self._config.restart_keys:
+            keys = parse_action_keys(raw)
+            for key in keys:
+                self._pdi.keyDown(key)
             time.sleep(self._config.tap_duration)
-            self._pdi.keyUp(key)
+            for key in reversed(keys):
+                self._pdi.keyUp(key)
             # Menus need a beat to process each keystroke.
             time.sleep(0.05)
 
     def release_all(self) -> None:
         """Drop any held key. Always call this before resetting or exiting."""
-        if self._held_key is not None:
-            self._pdi.keyUp(self._held_key)
-            self._held_key = None
+        if self._pdi is None:
+            return
+        for key in list(self._held_keys):
+            with contextlib.suppress(Exception):
+                self._pdi.keyUp(key)
+        self._held_keys.clear()
 
-    def _key_for(self, action: int) -> str | None:
-        keys = self._config.action_keys
-        if not 0 <= action < len(keys):
-            raise ValueError(f"Action {action} outside 0..{len(keys) - 1}")
-        return keys[action]
+        # Best effort safety release of all known configured keys
+        all_keys: set[str] = set()
+        for raw in self._config.action_keys:
+            all_keys.update(parse_action_keys(raw))
+        for raw in self._config.restart_keys:
+            all_keys.update(parse_action_keys(raw))
+        for key in all_keys:
+            with contextlib.suppress(Exception):
+                self._pdi.keyUp(key)
 
 
 class NullController:

@@ -27,6 +27,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from ai_player.config import LOGS_DIR, MODELS_DIR, AppConfig, load_config
+from ai_player.controls import validate_action_keys
 from ai_player.environment import make_env
 from ai_player.policies import MultiModalExtractor
 
@@ -247,6 +248,12 @@ def check_environment(config: AppConfig, *, mock: bool) -> int:
     try:
         print(f"observation_space: {env.observation_space}")
         print(f"action_space     : {env.action_space}")
+        print("\nConfigured actions & key verification:")
+        for a in validate_action_keys(config.control):
+            status = "OK" if a["valid"] else f"WARN: {', '.join(a['warnings'])}"
+            keys_str = str(a["keys"] or "None")
+            print(f"  [{a['index']}] {a['formatted']:<18} -> {keys_str:<15} [{status}]")
+        print()
         gym_check_env(env, skip_render_check=True)
         sb3_check_env(env, warn=True)
     except (AssertionError, ValueError) as exc:
@@ -271,6 +278,14 @@ def main(argv: list[str] | None = None) -> int:
     model_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
     config.save(model_dir / "config.json")
+
+    print("=" * 60)
+    print("ACTION SPACE & KEY VERIFICATION:")
+    for a in validate_action_keys(config.control):
+        status = "OK" if a["valid"] else f"WARN: {', '.join(a['warnings'])}"
+        keys_str = str(a["keys"] or "None")
+        print(f"  Action {a['index']:2d}: {a['formatted']:<20} -> {keys_str:<15} [{status}]")
+    print("=" * 60)
 
     if args.countdown > 0:
         for remaining in range(args.countdown, 0, -1):

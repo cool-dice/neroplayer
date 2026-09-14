@@ -144,18 +144,35 @@ plumbing clearly produces a learning signal the policy can exploit.
    fires, which score reader is active, and what it currently reads.
 
 4. Set the key map in `config.json` if the defaults are wrong. `action_keys`
-   maps action index → key, and `null` is the mandatory "do nothing" action:
+   maps action index → key, and `null` is the mandatory "do nothing" action.
+   **Simultaneous multi-key combos** are fully supported (e.g. running right while shooting or jumping):
 
    ```json
    "control": {
-     "action_keys": ["up", "down", null],
+     "action_keys": [
+       null,
+       "d",
+       "a",
+       "space",
+       "j",
+       ["d", "space"],
+       ["d", "j"],
+       "d+space+j"
+     ],
      "restart_keys": ["space"],
      "hold_keys": false
    }
    ```
 
-   Use `hold_keys: true` for continuous movement (the key stays down until the
-   agent picks a different action) and `false` for discrete inputs like jumping.
+   - Single keys: `"d"`, `"space"`, etc.
+   - Multi-key combos: `["d", "space"]` or `"d+space"` (both keys are pressed simultaneously).
+   - Use `hold_keys: true` for continuous movement (the keys stay down until the
+     agent picks a different action) and `false` for discrete inputs like jumping.
+   - Test and verify all keys in your game window:
+     ```bash
+     python calibrate.py --config config.json --test-keys
+     ```
+     This validates the key names against DirectX scan codes and triggers each action in sequence so you can confirm in-game reactions.
 
 5. Verify the environment contract and the reward signal, without sending any
    input:
@@ -172,8 +189,14 @@ plumbing clearly produces a learning signal the policy can exploit.
 6. Train, giving yourself time to focus the game window:
 
    ```bash
-   python train.py --config config.json --timesteps 500000 --countdown 5
+   python train.py --config config.json --timesteps 500000 --countdown 5 --render
    ```
+
+   The `--render` flag opens a real-time HUD dashboard featuring:
+   - **Real Measured FPS** calculated from actual step intervals vs target FPS.
+   - **Active Action & Full Action Palette** highlighting the current action and multi-key combos.
+   - **CNN Real Input (84x84 Grayscale)**: A picture-in-picture inset in the corner showing the exact downscaled observation entering the CNN, along with the 4-frame temporal filmstrip showing how motion and velocity are perceived.
+   - **Motion & Stagnation Diff**: Live visual diff percentage and idle state.
 
    Ctrl+C saves `models/<run>/interrupted.zip`; checkpoints are written every
    `train.checkpoint_every` steps. Resume with

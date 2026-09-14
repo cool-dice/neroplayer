@@ -17,11 +17,13 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+from typing import Any
 
 import cv2
 import numpy as np
 
 from .config import AppConfig, Region
+from .controls import parse_action_keys
 from .perception import AudioConfig, AudioFeatureExtractor
 
 CANVAS_WIDTH = 320
@@ -290,14 +292,19 @@ class MockAudioSource:
 class MockController:
     """Sends the agent's key presses straight into the simulation."""
 
-    def __init__(self, game: MockArcadeGame, action_keys: list[str | None]) -> None:
+    def __init__(self, game: MockArcadeGame, action_keys: list[Any]) -> None:
         self._game = game
         self._action_keys = action_keys
 
     def act(self, action: int) -> None:
         if not 0 <= int(action) < len(self._action_keys):
             raise ValueError(f"Action {action} outside 0..{len(self._action_keys) - 1}")
-        self._game.press(self._action_keys[int(action)])
+        keys = parse_action_keys(self._action_keys[int(action)])
+        if not keys:
+            self._game.press(None)
+        else:
+            for k in keys:
+                self._game.press(k)
 
     def restart(self) -> None:
         self._game.restart()

@@ -140,3 +140,24 @@ def test_render_returns_rgb_frames():
     assert frame.shape == (region.height, region.width, 3)
     assert hud.shape == (region.height, region.width, 3)
 
+
+def test_env_tracks_real_fps_and_renders_hud_details():
+    config = mock_config()
+    config.control.action_keys = ["up", "down", "up+down", None]
+    env = make_env(config, mock=True, render_mode="rgb_array", seed=10)
+    try:
+        env.reset()
+        for action in range(4):
+            _obs, _rew, _term, _trunc, info = env.step(action)
+            assert "real_fps" in info
+            assert isinstance(info["real_fps"], float)
+            assert "action" in info
+            assert info["action"] == action
+
+        hud = env.render_hud()
+        assert hud is not None
+        assert hud.shape == (config.capture.region.height, config.capture.region.width, 3)
+    finally:
+        env.close()
+
+

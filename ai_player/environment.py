@@ -19,6 +19,7 @@ identical control flow without Windows, a display or audio hardware.
 from __future__ import annotations
 
 import time
+from collections import deque
 from typing import Any, ClassVar
 
 import cv2
@@ -27,7 +28,7 @@ import numpy as np
 from gymnasium import spaces
 
 from .config import AppConfig
-from .controls import ActionController, build_controller
+from .controls import ActionController, build_controller, format_action
 from .observer import GameObserver
 from .perception import (
     AudioFeatureExtractor,
@@ -100,6 +101,9 @@ class GameEnv(gym.Env):
         self._next_frame_at = 0.0
         self._last_frame: np.ndarray | None = None
         self._last_info: dict[str, Any] = {}
+        self._last_step_time = 0.0
+        self._fps_history: deque[float] = deque(maxlen=30)
+        self._real_fps = 0.0
         self._episode_steps = 0
         self._episode_reward = 0.0
         self._episode_index = 0
@@ -143,6 +147,9 @@ class GameEnv(gym.Env):
         self._episode_steps = 0
         self._episode_reward = 0.0
         self._episode_index += 1
+        self._last_step_time = 0.0
+        self._fps_history.clear()
+        self._real_fps = 0.0
         self._next_frame_at = time.perf_counter()
         self._last_frame = frame
 
@@ -150,6 +157,14 @@ class GameEnv(gym.Env):
         return self._observation(), info
 
     def step(self, action: int) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+        now = time.perf_counter()
+        if self._last_step_time > 0.0:
+            dt = now - self._last_step_time
+            if dt > 0.0:
+                self._fps_history.append(dt)
+                self._real_fps = len(self._fps_history) / sum(self._fps_history)
+        self._last_step_time = now
+
         self._controller.act(int(action))
         frame = self._capture_frame()
         self._last_frame = frame
@@ -176,6 +191,7 @@ class GameEnv(gym.Env):
             "frame_diff": verdict.frame_diff,
             "is_idle": verdict.is_idle,
             "action": int(action),
+            "real_fps": self._real_fps,
         }
         self._last_info = info
         if self.render_mode == "human":
@@ -183,7 +199,7 @@ class GameEnv(gym.Env):
         return self._observation(), float(verdict.reward), bool(verdict.terminated), truncated, info
 
     def _draw_hud(self, frame: np.ndarray) -> np.ndarray:
-        """Overlay telemetry and action info onto the frame for human preview."""
+        """Overlay telemetry, action palette, and CNN vision inset for human preview."""
         out = frame.copy()
         h, w = out.shape[:2]
 
@@ -200,19 +216,19 @@ class GameEnv(gym.Env):
             if x2 > x1 and y2 > y1:
                 cv2.rectangle(out, (x1, y1), (x2, y2), colour, 1)
 
-        # Draw semi-transparent telemetry bar at the top or bottom
-        bar_height = 80
+        # Draw semi-transparent telemetry bar at the top
+        bar_height = min(96, max(44, h // 3))
         overlay = out.copy()
-        cv2.rectangle(overlay, (0, 0), (w, bar_height), (20, 20, 20), -1)
-        cv2.addWeighted(overlay, 0.7, out, 0.3, 0, out)
+        cv2.rectangle(overlay, (0, 0), (w, bar_height), (18, 18, 18), -1)
+        cv2.addWeighted(overlay, 0.75, out, 0.25, 0, out)
 
         action_idx = self._last_info.get("action")
         keys = self.config.control.action_keys
         if action_idx is not None and 0 <= action_idx < len(keys):
-            key_name = keys[action_idx]
-            action_text = f"ACTION: [{key_name if key_name is not None else 'IDLE/NONE'}]"
+            action_name = format_action(keys[action_idx])
+            action_text = f"ACTIVE [{action_idx}]: [{action_name}]"
         else:
-            action_text = "ACTION: --"
+            action_text = "ACTIVE: --"
 
         ep_rew = self._last_info.get("episode_reward", 0.0)
         ep_step = self._last_info.get("episode_steps", 0)
@@ -221,40 +237,159 @@ class GameEnv(gym.Env):
         is_idle = self._last_info.get("is_idle", False)
         go_conf = self._last_info.get("game_over_confidence", 0.0)
 
-        # Status text lines
         status_color = (0, 0, 255) if is_idle else (0, 255, 0)
         motion_status = "STAGNANT / IDLE" if is_idle else "ACTIVE MOTION"
 
+        target_fps = self.config.env.target_fps
+        fps_text = (
+            f"REAL FPS: {self._real_fps:4.1f} (target {target_fps:.1f})"
+            if target_fps > 0
+            else f"REAL FPS: {self._real_fps:4.1f} (UNPACED)"
+        )
+
+        # Line 1: Episode stats & Real FPS
+        line1 = (
+            f"EP #{self._episode_index} | STEP: {ep_step:4d} | "
+            f"REW: {ep_rew:+6.1f} | PTS: {points:.0f} | {fps_text}"
+        )
         cv2.putText(
             out,
-            f"EP #{self._episode_index} | STEP: {ep_step:4d} | REWARD: {ep_rew:+6.1f} | PTS: {points:.0f}",
-            (10, 22),
+            line1,
+            (10, 20),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
+            0.50,
             (255, 255, 255),
             1,
             cv2.LINE_AA,
         )
+
+        # Line 2: Active action & Motion Status
         cv2.putText(
             out,
             f"{action_text} | DIFF: {frame_diff * 100:4.1f}% [{motion_status}]",
-            (10, 48),
+            (10, 42),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
+            0.50,
             status_color,
             1,
             cv2.LINE_AA,
         )
+
+        # Line 3: Configured Action Palette
+        chips = []
+        for i, raw_k in enumerate(keys):
+            name = format_action(raw_k)
+            if i == action_idx:
+                chips.append(f">> [{i}:{name}] <<")
+            else:
+                chips.append(f"[{i}:{name}]")
+        chips_str = "  ".join(chips)
         cv2.putText(
             out,
-            f"GAME OVER CONF: {go_conf:4.2f} | FPS TARGET: {self.config.env.target_fps:.1f}",
-            (10, 72),
+            f"ACTIONS: {chips_str}",
+            (10, 64),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.50,
-            (200, 200, 200),
+            0.45,
+            (0, 255, 255),
             1,
             cv2.LINE_AA,
         )
+
+        # Line 4: Game Over confidence & Region key
+        cv2.putText(
+            out,
+            f"GAME OVER CONF: {go_conf:4.2f} | BOXES: [GREEN=SCORE, RED=OVER]",
+            (10, 84),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.40,
+            (180, 180, 180),
+            1,
+            cv2.LINE_AA,
+        )
+
+        # Picture-in-Picture: Visualizing the Neural Network's actual 84x84 observation
+        try:
+            obs = self._stack.observation  # shape: (frame_stack, 84, 84)
+            if obs is not None and obs.ndim == 3 and obs.shape[0] > 0:
+                inset_w = 168 if w >= 450 else (84 if w >= 220 else 0)
+                inset_h = inset_w
+                header_h = 18
+                if inset_w > 0 and h >= inset_h + header_h + bar_height + 20:
+                    latest_gray = obs[-1]
+                    scaled_cnn = cv2.resize(
+                        latest_gray, (inset_w, inset_h), interpolation=cv2.INTER_NEAREST
+                    )
+                    cnn_bgr = cv2.cvtColor(scaled_cnn, cv2.COLOR_GRAY2BGR)
+
+                    x_start = w - inset_w - 10
+                    y_start = h - inset_h - 10
+
+                    # Inset background and border
+                    cv2.rectangle(
+                        out,
+                        (x_start - 2, y_start - header_h - 2),
+                        (x_start + inset_w + 2, y_start + inset_h + 2),
+                        (0, 255, 255),
+                        1,
+                    )
+                    cv2.rectangle(
+                        out,
+                        (x_start, y_start - header_h),
+                        (x_start + inset_w, y_start),
+                        (30, 30, 30),
+                        -1,
+                    )
+                    cv2.putText(
+                        out,
+                        "CNN INPUT (84x84)",
+                        (x_start + 6, y_start - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.40,
+                        (0, 255, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+                    out[y_start : y_start + inset_h, x_start : x_start + inset_w] = cnn_bgr
+
+                    # If vertical room permits, show the 4-frame temporal filmstrip
+                    film_h = 32
+                    film_w = inset_w // 4
+                    if h >= inset_h + header_h + film_h + bar_height + 30 and film_w > 0:
+                        y_film = y_start - header_h - film_h - 6
+                        cv2.rectangle(
+                            out,
+                            (x_start - 2, y_film - 2),
+                            (x_start + inset_w + 2, y_film + film_h + 2),
+                            (100, 100, 100),
+                            1,
+                        )
+                        n_chips = min(4, obs.shape[0])
+                        for i in range(n_chips):
+                            chip = cv2.resize(
+                                obs[i], (film_w, film_h), interpolation=cv2.INTER_NEAREST
+                            )
+                            chip_bgr = cv2.cvtColor(chip, cv2.COLOR_GRAY2BGR)
+                            cx = x_start + i * film_w
+                            out[y_film : y_film + film_h, cx : cx + film_w] = chip_bgr
+                            cv2.rectangle(
+                                out,
+                                (cx, y_film),
+                                (cx + film_w, y_film + film_h),
+                                (60, 60, 60),
+                                1,
+                            )
+                            cv2.putText(
+                                out,
+                                f"t{i - n_chips + 1}",
+                                (cx + 2, y_film + film_h - 3),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.30,
+                                (0, 255, 0),
+                                1,
+                            )
+        except Exception:
+            pass
+
         return out
 
     def render_hud(self) -> np.ndarray | None:
