@@ -12,7 +12,8 @@
     "width": 84,
     "height": 84,
     "grayscale": true,
-    "frame_stack": 4
+    "frame_stack": 4,
+    "backbone": "nature_cnn"
   },
   "audio": {
     "enabled": true,
@@ -102,5 +103,21 @@
     "checkpoint_every": 10000,
     "seed": null,
     "device": "auto"
+  },
+  "tracker": {
+    "enabled": true,
+    "auto_probe": true,
+    "probe_actions": 6,
+    "history_len": 30,
+    "min_entity_area": 16,
+    "max_entity_area": 15000,
+    "collision_distance_threshold": 24.0
+  },
+  "hud": {
+    "auto_detect": true,
+    "use_vlm": false,
+    "vlm_endpoint": "http://localhost:11434/api/generate",
+    "vlm_model": "qwen2.5-vl",
+    "vlm_timeout": 3.0
   }
 }

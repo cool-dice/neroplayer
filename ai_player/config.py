@@ -62,7 +62,7 @@ class CaptureConfig:
 
 @dataclass
 class VisionConfig:
-    """Image preprocessing, mirroring the classic Atari DQN pipeline."""
+    """Image preprocessing, mirroring the classic Atari DQN pipeline or modern backbones."""
 
     width: int = 84
     height: int = 84
@@ -70,6 +70,12 @@ class VisionConfig:
     # Number of consecutive frames handed to the CNN. Stacking is what gives a
     # feed-forward policy access to velocity/direction information.
     frame_stack: int = 4
+    # Feature extractor backbone architecture: 'nature_cnn', 'convnext', 'resnet'
+    backbone: str = "nature_cnn"
+
+    @property
+    def rgb(self) -> bool:
+        return not self.grayscale
 
     @property
     def channels(self) -> int:
@@ -255,6 +261,30 @@ class TrainConfig:
 
 
 @dataclass
+class TrackerConfig:
+    """Settings for Controllability Probe and Dynamic Entity Tracker."""
+
+    enabled: bool = False
+    auto_probe: bool = False
+    probe_actions: int = 6  # number of test probe action steps to run
+    history_len: int = 30
+    min_entity_area: int = 16
+    max_entity_area: int = 15000
+    collision_distance_threshold: float = 24.0
+
+
+@dataclass
+class HUDConfig:
+    """Settings for Autonomous HUD Detection (VLM + heuristic fallback)."""
+
+    auto_detect: bool = True
+    use_vlm: bool = False
+    vlm_endpoint: str = "http://localhost:11434/api/generate"  # Ollama / OpenAI-compatible
+    vlm_model: str = "qwen2.5-vl"
+    vlm_timeout: float = 3.0
+
+
+@dataclass
 class AppConfig:
     """Root config object passed around the whole project."""
 
@@ -265,6 +295,8 @@ class AppConfig:
     reward: RewardConfig = field(default_factory=RewardConfig)
     env: EnvConfig = field(default_factory=EnvConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+    tracker: TrackerConfig = field(default_factory=TrackerConfig)
+    hud: HUDConfig = field(default_factory=HUDConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -295,6 +327,8 @@ _NESTED_FIELDS: dict[str, type] = {
     "reward": RewardConfig,
     "env": EnvConfig,
     "train": TrainConfig,
+    "tracker": TrackerConfig,
+    "hud": HUDConfig,
     "region": Region,
     "game_over_region": Region,
     "score_region": Region,

@@ -329,6 +329,9 @@ def mock_config(base: AppConfig | None = None) -> AppConfig:
     # The simulation advances on capture, so real-time pacing only slows tests.
     config.env.target_fps = 0.0
     config.env.reset_delay = 0.0
+    config.tracker.enabled = False
+    config.tracker.auto_probe = False
+    config.hud.auto_detect = False
     return config
 
 

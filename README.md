@@ -42,7 +42,8 @@ python train.py --mock --timesteps 20000      # trains against the simulator
 | `ai_player/controls.py` | `pydirectinput` keyboard driver (tap or hold), restart sequences, guaranteed key release. |
 | `ai_player/observer.py` | The critic. Detects game over (`cv2.matchTemplate` or a banner-colour coverage check) and score gains (Tesseract OCR or a pixel-signature fallback), then shapes the reward. |
 | `ai_player/environment.py` | The `gymnasium.Env`: Dict observation space (image + audio), `Discrete` actions, fixed-rate stepping, episode resets. |
-| `ai_player/policies.py` | `MultiModalExtractor`: CNN branch + audio MLP branch → fused feature vector for SB3. |
+| `ai_player/policies.py` | `MultiModalExtractor`: Vision backbone (Nature-DQN / ConvNeXt / ResNet) + audio MLP branch → fused feature vector for SB3. |
+| `ai_player/tracker.py` | Controllability probe (avatar auto-detection via differential optical flow) + foreground entity tracker (projectiles, threats, collectibles, causal collision analysis). |
 | `ai_player/mock_game.py` | A three-lane dodger rendered with OpenCV, plus drop-in capture/audio/control backends. Used by `--mock` and the tests. |
 | `train.py` / `play.py` / `calibrate.py` | Training loop, evaluation/recording, and region calibration (pick / check / live preview). |
 | `assets/templates/` | Where the game-over template crop lives. |
@@ -224,6 +225,37 @@ reward = step_reward                    # +0.1 survival drip, dense signal
        + movement_reward if moving      # positive reward when screen pixels change
        + game_over_penalty  if dead     # -100, dominates the return
 ```
+
+## Universal Autonomous Game Agent Architecture
+
+The agent supports fully autonomous zero-shot adaptation across four core pillars:
+
+1. **Modern High-Capacity Vision Backbone (ConvNeXt / ResNet / Nature-CNN)**:
+   - Configurable resolutions: 84×84, 128×128, 256×256 RGB or grayscale.
+   - Preserves 3 color channels per frame stacked into `3 * frame_stack` channels.
+   - Built-in `ConvNeXtBackbone` (7×7 depthwise convs, LayerNorm, GELU) and `ResNetBackbone` (residual skip blocks) with adaptive average pooling projecting to arbitrary `features_dim` (e.g. 512, 1024).
+   - CLI flags: `--backbone convnext --rgb --resolution 256 --features-dim 1024`.
+
+2. **Controllability Probe (Autonomous Player Avatar Discovery)**:
+   - Evaluates differential optical flow (`cv2.calcOpticalFlowFarneback`) or temporal differencing during initial action probes.
+   - Discovers which visual component moves in direct correlation with directional inputs (`left`, `right`, `up`, `down`, `jump`).
+   - Automatically outputs and tracks the player avatar bounding box over time.
+   - CLI verification: `python calibrate.py --probe-avatar`.
+
+3. **Autonomous Dynamic Observer & Zero-Shot HUD Detection**:
+   - Zero-shot automatic HUD extraction (`AutonomousHUDDetector`).
+   - Saliency, edge gradient, and character glyph clustering automatically identifies Score, Lives, and Game Over regions without manual calibration.
+   - Optional local Vision-Language Model (`VLMObserverInterface`) queryable via Ollama or OpenAI-compatible endpoints (e.g. Qwen2.5-VL, MiniCPM).
+   - CLI verification: `python calibrate.py --auto-hud`.
+
+4. **Threat, Projectile & Entity Tracker**:
+   - Dynamic foreground object segmentation outside the player bounding box.
+   - Classifies detected dynamic entities into:
+     - `PROJECTILE`: Fast linear velocity (>7 px/step), compact bounding box.
+     - `THREAT`: Movement oriented toward the player or platform patrolling.
+     - `COLLECTIBLE`: Floating or falling items, slow vertical drift.
+   - **Causal collision analysis**: Correlates entity intersections with immediate game feedback (life loss / death -> penalty; score gain -> reward).
+   - Real-time HUD telemetry overlays player avatar box, entity bounding boxes, and velocity threat vectors.
 
 - **Survival drip** gives PPO a gradient before it has ever scored. Without it
   the reward is sparse enough that early learning stalls.

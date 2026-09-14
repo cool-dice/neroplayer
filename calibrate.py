@@ -26,9 +26,10 @@ import cv2
 import numpy as np
 
 from ai_player.config import CAPTURES_DIR, TEMPLATES_DIR, AppConfig, Region, load_config
-from ai_player.controls import build_controller, validate_action_keys
-from ai_player.observer import build_game_over_detector, build_score_signal
+from ai_player.controls import build_controller, format_action, parse_action_keys, validate_action_keys
+from ai_player.observer import AutonomousHUDDetector, build_game_over_detector, build_score_signal
 from ai_player.perception import FrameProcessor, crop_region
+from ai_player.tracker import ControllabilityProbe
 
 WINDOW = "calibrate -- drag a box, Enter to accept, c to cancel"
 
@@ -55,6 +56,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--profile",
         action="store_true",
         help="Benchmark pipeline latencies (capture, process, audio, render) to diagnose FPS bottleneck",
+    )
+    mode.add_argument(
+        "--auto-hud",
+        action="store_true",
+        help="Run autonomous zero-shot HUD detection and display detected bounding boxes",
+    )
+    mode.add_argument(
+        "--probe-avatar",
+        action="store_true",
+        help="Run controllability probe to auto-detect the player avatar BBox",
     )
     parser.add_argument("--output", type=Path, default=Path("config.json"))
     parser.add_argument("--config", type=Path, default=None, help="Start from an existing config")
@@ -452,6 +463,100 @@ def capture_template(args: argparse.Namespace, config: AppConfig) -> None:
     print(f"\nSaved template {template_path} (mean BGR {config.reward.game_over_color_bgr})")
 
 
+def run_auto_hud(args: argparse.Namespace, config: AppConfig) -> int:
+    """Run autonomous zero-shot HUD detection on game frame and save/display result."""
+    print(f"Capturing game frame in {args.delay:.0f}s...")
+    time.sleep(args.delay)
+    frame = grab(config.capture.region.as_mss_monitor())
+
+    detector = AutonomousHUDDetector(config.hud)
+    detected = detector.detect_hud(frame)
+
+    print("\n" + "=" * 60)
+    print("AUTONOMOUS HUD DETECTION RESULT:")
+    print("=" * 60)
+    print(f"  Method     : {detected.method.upper()}")
+    print(f"  Confidence : {detected.confidence:.2f}")
+    print(f"  Score ROI  : {detected.score_region}")
+    print(f"  Lives ROI  : {detected.lives_region}")
+    print(f"  Game Over  : {detected.game_over_region}")
+    print("=" * 60)
+
+    if detected.score_region:
+        config.reward.score_region = detected.score_region
+    if detected.game_over_region:
+        config.reward.game_over_region = detected.game_over_region
+
+    out_img = annotate(frame, config)
+    CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = CAPTURES_DIR / "auto_hud_detected.png"
+    cv2.imwrite(str(out_path), out_img)
+    print(f"\nSaved preview annotation to {out_path}")
+
+    if args.output:
+        saved = config.save(args.output)
+        print(f"Updated configuration written to {saved}")
+    return 0
+
+
+def run_probe_avatar(args: argparse.Namespace, config: AppConfig) -> int:
+    """Run controllability probe to discover the player avatar bounding box."""
+    print("\nStarting Controllability Probe in 3 seconds -- focus game window!")
+    for sec in range(3, 0, -1):
+        print(f"  {sec}...", flush=True)
+        time.sleep(1.0)
+
+    probe = ControllabilityProbe(config.tracker)
+    monitor = config.capture.region.as_mss_monitor()
+
+    frame0 = grab(monitor)
+    probe.record_probe_step("idle", frame0)
+
+    try:
+        controller = build_controller(config.control, dry_run=False)
+    except Exception as exc:
+        print(f"Key controller unavailable ({exc}); probe requires live controls.")
+        return 1
+
+    actions = config.control.action_keys
+    for a_idx, raw_k in enumerate(actions):
+        keys = parse_action_keys(raw_k)
+        if not keys:
+            continue
+        act_name = format_action(raw_k)
+        print(f"  Probing action [{act_name}]...")
+        controller.act(a_idx)
+        time.sleep(0.06)
+        f = grab(monitor)
+        probe.record_probe_step(act_name, f)
+        time.sleep(0.04)
+
+    controller.release_all()
+    print("Analyzing differential optical flow...")
+    bbox = probe.analyze_probes()
+
+    print("\n" + "=" * 60)
+    print("CONTROLLABILITY PROBE RESULT:")
+    print("=" * 60)
+    if bbox is not None:
+        print(f"  Player Avatar BBox : x={bbox.x}, y={bbox.y}, w={bbox.w}, h={bbox.h}")
+        print(f"  Confidence         : {probe.confidence:.2f}")
+        # Draw box on last frame
+        annotated = frame0.copy()
+        cv2.rectangle(annotated, (bbox.x, bbox.y), (bbox.x + bbox.w, bbox.y + bbox.h), (0, 255, 255), 2)
+        cv2.putText(
+            annotated, "PLAYER AVATAR", (bbox.x, max(14, bbox.y - 5)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2
+        )
+        CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(CAPTURES_DIR / "avatar_probe.png"), annotated)
+        print(f"  Preview written to {CAPTURES_DIR / 'avatar_probe.png'}")
+    else:
+        print("  Player Avatar      : Inconclusive (insufficient differential flow detected)")
+    print("=" * 60)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     config = load_config(args.config)
@@ -466,6 +571,10 @@ def main(argv: list[str] | None = None) -> int:
             return run_test_keys(config)
         if args.profile:
             return run_profile(config)
+        if args.auto_hud:
+            return run_auto_hud(args, config)
+        if args.probe_avatar:
+            return run_probe_avatar(args, config)
         return run_pick(args, config)
     except RuntimeError as exc:
         print(exc)

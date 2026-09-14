@@ -25,7 +25,11 @@ death rather than farm the drip next to a hazard.
 
 from __future__ import annotations
 
+import base64
+import json
 import re
+import urllib.error
+import urllib.request
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,7 +38,7 @@ from typing import Protocol, runtime_checkable
 import cv2
 import numpy as np
 
-from .config import RewardConfig
+from .config import HUDConfig, Region, RewardConfig
 from .perception import BGRFrame, crop_region
 
 _DIGITS = re.compile(r"\d+")
@@ -295,6 +299,189 @@ def build_score_signal(reward: RewardConfig) -> ScoreSignal:
 
 
 # ---------------------------------------------------------------------------
+# Autonomous HUD Detection & VLM Observer Interface
+# ---------------------------------------------------------------------------
+@dataclass
+class DetectedHUDRegions:
+    """Estimated bounding regions for core game HUD elements."""
+
+    score_region: Region | None = None
+    lives_region: Region | None = None
+    game_over_region: Region | None = None
+    confidence: float = 0.0
+    method: str = "none"
+
+
+class VLMObserverInterface:
+    """Interacts with local OpenAI-compatible or Ollama Vision-Language Models (e.g. Qwen2.5-VL, MiniCPM)."""
+
+    def __init__(self, hud_config: HUDConfig) -> None:
+        self.config = hud_config
+
+    def detect_hud(self, frame: BGRFrame) -> DetectedHUDRegions | None:
+        """Query local VLM to identify bounding boxes of Score, Lives/HP, and Game Over."""
+        if not self.config.use_vlm:
+            return None
+
+        h, w = frame.shape[:2]
+        # Encode frame as JPEG base64
+        success, buffer = cv2.imencode(".jpg", frame)
+        if not success:
+            return None
+        b64_image = base64.b64encode(buffer).decode("utf-8")
+
+        prompt = (
+            f"You are analyzing a video game frame of resolution {w}x{h}. "
+            "Identify the pixel bounding box for the following HUD elements if present: "
+            "1. score (number counting points/score) "
+            "2. lives (remaining lives or health bar) "
+            "3. game_over (area where GAME OVER banner appears). "
+            'Return ONLY valid JSON: {"score": [x,y,w,h], "lives": [x,y,w,h], "game_over": [x,y,w,h]}'
+        )
+
+        try:
+            # Try Ollama / OpenAI-compatible endpoint
+            payload = json.dumps({
+                "model": self.config.vlm_model,
+                "prompt": prompt,
+                "images": [b64_image],
+                "stream": False,
+                "format": "json",
+            }).encode("utf-8")
+
+            req = urllib.request.Request(
+                self.config.vlm_endpoint,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=self.config.vlm_timeout) as response:
+                res_data = json.loads(response.read().decode("utf-8"))
+
+            content = res_data.get("response") or res_data.get("content") or ""
+            parsed = json.loads(content) if isinstance(content, str) else content
+
+            score_box = parsed.get("score")
+            lives_box = parsed.get("lives")
+            go_box = parsed.get("game_over")
+
+            def make_reg(box: list[int] | None) -> Region | None:
+                if box and len(box) == 4 and box[2] > 0 and box[3] > 0:
+                    return Region(left=int(box[0]), top=int(box[1]), width=int(box[2]), height=int(box[3]))
+                return None
+
+            return DetectedHUDRegions(
+                score_region=make_reg(score_box),
+                lives_region=make_reg(lives_box),
+                game_over_region=make_reg(go_box),
+                confidence=0.85,
+                method="vlm",
+            )
+        except Exception as exc:
+            warnings.warn(
+                f"VLM HUD detection request failed ({exc}); falling back to heuristic detector.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return None
+
+
+class AutonomousHUDDetector:
+    """Zero-shot autonomous HUD extraction.
+
+    Uses high-speed visual saliency, edge contrast, and OCR/glyph clustering in typical
+    HUD bands (top-left, top-right, bottom), with optional VLM integration.
+    """
+
+    def __init__(self, hud_config: HUDConfig | None = None) -> None:
+        self.config = hud_config or HUDConfig()
+        self.vlm = VLMObserverInterface(self.config)
+
+    def detect_hud(self, frame: BGRFrame) -> DetectedHUDRegions:
+        """Perform zero-shot HUD detection with VLM or heuristic fallback."""
+        if self.config.use_vlm:
+            vlm_res = self.vlm.detect_hud(frame)
+            if vlm_res is not None and vlm_res.score_region is not None:
+                return vlm_res
+
+        return self._heuristic_detect(frame)
+
+    def _heuristic_detect(self, frame: BGRFrame) -> DetectedHUDRegions:
+        """Heuristic HUD detector running locally with zero external network dependencies."""
+        h, w = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+
+        # Typical HUD regions are located in top band (0 to 18% of height)
+        # or bottom band (88% to 100% of height)
+        top_band_h = max(20, int(h * 0.18))
+        top_band = gray[:top_band_h, :]
+
+        # Look for text-like contours or high-contrast digit clusters in top band
+        # 1. Edge & gradient analysis
+        grad_x = cv2.Sobel(top_band, cv2.CV_16S, 1, 0, ksize=3)
+        abs_grad_x = cv2.convertScaleAbs(grad_x)
+        _, thresh = cv2.threshold(abs_grad_x, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+
+        # Close horizontally to merge character glyphs into words/numbers
+        morph_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 3))
+        connected = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, morph_k)
+
+        contours, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        candidate_regions: list[tuple[int, int, int, int]] = []
+        for cnt in contours:
+            x, y, cw, ch = cv2.boundingRect(cnt)
+            # Filter contours matching typical HUD digit/label ratios
+            if 10 <= cw <= int(w * 0.4) and 8 <= ch <= top_band_h:
+                candidate_regions.append((x, y, cw, ch))
+
+        score_reg: Region | None = None
+        lives_reg: Region | None = None
+
+        if candidate_regions:
+            # Sort left to right
+            candidate_regions.sort(key=lambda r: r[0])
+            # The first prominent candidate in top-left or top-right is usually score
+            first = candidate_regions[0]
+            # Add small padding
+            pad = 2
+            score_reg = Region(
+                left=max(0, first[0] - pad),
+                top=max(0, first[1] - pad),
+                width=min(w - first[0], first[2] + 2 * pad),
+                height=min(h - first[1], first[3] + 2 * pad),
+            )
+            if len(candidate_regions) > 1:
+                second = candidate_regions[-1]
+                lives_reg = Region(
+                    left=max(0, second[0] - pad),
+                    top=max(0, second[1] - pad),
+                    width=min(w - second[0], second[2] + 2 * pad),
+                    height=min(h - second[1], second[3] + 2 * pad),
+                )
+        else:
+            # Default fallback: top-left corner band for score
+            score_reg = Region(left=8, top=4, width=min(180, w // 2), height=min(36, h // 5))
+
+        # Default fallback for game-over: centered banner
+        banner_w = int(w * 0.6)
+        banner_h = int(h * 0.25)
+        go_reg = Region(
+            left=(w - banner_w) // 2,
+            top=(h - banner_h) // 2,
+            width=banner_w,
+            height=banner_h,
+        )
+
+        return DetectedHUDRegions(
+            score_region=score_reg,
+            lives_region=lives_reg,
+            game_over_region=go_reg,
+            confidence=0.75 if candidate_regions else 0.5,
+            method="heuristic",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Observer
 # ---------------------------------------------------------------------------
 @dataclass
@@ -322,10 +509,16 @@ class GameObserver:
         self,
         reward: RewardConfig,
         *,
+        hud_config: HUDConfig | None = None,
         game_over_detector: GameOverDetector | None = None,
         score_signal: ScoreSignal | None = None,
     ) -> None:
         self._reward = reward
+        self._hud_config = hud_config
+        self._hud_detector = (
+            AutonomousHUDDetector(hud_config) if hud_config and hud_config.auto_detect else None
+        )
+        self._detected_hud: DetectedHUDRegions | None = None
         self._game_over = game_over_detector or build_game_over_detector(reward)
         self._score = score_signal or build_score_signal(reward)
         self._streak = 0
@@ -335,6 +528,23 @@ class GameObserver:
     @property
     def episode_points(self) -> float:
         return self._episode_points
+
+    @property
+    def detected_hud(self) -> DetectedHUDRegions | None:
+        return self._detected_hud
+
+    def auto_configure_hud(self, frame: BGRFrame) -> DetectedHUDRegions | None:
+        """Autonomously detect and populate HUD regions if not explicitly pinned."""
+        if self._hud_detector is None:
+            return None
+        self._detected_hud = self._hud_detector.detect_hud(frame)
+        if self._detected_hud.score_region is not None:
+            self._reward.score_region = self._detected_hud.score_region
+            self._score = build_score_signal(self._reward)
+        if self._detected_hud.game_over_region is not None and not self._reward.game_over_template:
+            self._reward.game_over_region = self._detected_hud.game_over_region
+            self._game_over = build_game_over_detector(self._reward)
+        return self._detected_hud
 
     def reset(self) -> None:
         self._streak = 0

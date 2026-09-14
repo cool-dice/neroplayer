@@ -106,6 +106,58 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         help="Seconds to wait before starting, so you can focus the game window",
     )
+    # Architecture & Autonomous Agent flags
+    parser.add_argument(
+        "--backbone",
+        choices=["nature_cnn", "convnext", "resnet"],
+        default=None,
+        help="Vision backbone architecture (nature_cnn, convnext, resnet)",
+    )
+    parser.add_argument(
+        "--rgb",
+        action="store_true",
+        help="Use 3-channel RGB vision instead of grayscale",
+    )
+    parser.add_argument(
+        "--resolution",
+        type=int,
+        default=None,
+        help="Square vision resolution (e.g. 84, 128, 256)",
+    )
+    parser.add_argument(
+        "--features-dim",
+        type=int,
+        default=None,
+        help="Extracted feature vector dimension (e.g. 512, 1024)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Override training batch size",
+    )
+    parser.add_argument(
+        "--auto-hud",
+        action="store_true",
+        default=None,
+        help="Enable zero-shot autonomous HUD extraction",
+    )
+    parser.add_argument(
+        "--no-auto-hud",
+        action="store_true",
+        help="Disable autonomous HUD detection",
+    )
+    parser.add_argument(
+        "--auto-tracker",
+        action="store_true",
+        default=None,
+        help="Enable controllability probe and dynamic entity tracking",
+    )
+    parser.add_argument(
+        "--no-auto-tracker",
+        action="store_true",
+        help="Disable controllability probe and dynamic entity tracking",
+    )
     return parser.parse_args(argv)
 
 
@@ -136,6 +188,25 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.control.auto_combos = True
     if args.max_combo_size is not None:
         config.control.max_combo_size = args.max_combo_size
+    if args.backbone:
+        config.vision.backbone = args.backbone
+    if args.rgb:
+        config.vision.grayscale = False
+    if args.resolution is not None:
+        config.vision.width = args.resolution
+        config.vision.height = args.resolution
+    if args.features_dim is not None:
+        config.train.features_dim = args.features_dim
+    if args.batch_size is not None:
+        config.train.batch_size = args.batch_size
+    if args.auto_hud:
+        config.hud.auto_detect = True
+    if args.no_auto_hud:
+        config.hud.auto_detect = False
+    if args.auto_tracker:
+        config.tracker.enabled = True
+    if args.no_auto_tracker:
+        config.tracker.enabled = False
     return config
 
 
@@ -144,7 +215,10 @@ def build_model(config: AppConfig, env: DummyVecEnv, tensorboard_log: Path | Non
     train = config.train
     policy_kwargs = {
         "features_extractor_class": MultiModalExtractor,
-        "features_extractor_kwargs": {"features_dim": train.features_dim},
+        "features_extractor_kwargs": {
+            "features_dim": train.features_dim,
+            "backbone": config.vision.backbone,
+        },
     }
     common = {
         "policy": "MultiInputPolicy",  # required for Dict observation spaces

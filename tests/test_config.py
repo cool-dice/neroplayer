@@ -41,6 +41,20 @@ def test_config_survives_a_json_round_trip(tmp_path):
     assert restored.control.auto_combos is False
     assert restored.control.max_combo_size == 2
     assert restored.train.algo == "dqn"
+    assert restored.vision.backbone == "nature_cnn"
+    assert restored.tracker.enabled is False
+    assert restored.hud.auto_detect is False
+
+
+def test_vision_config_rgb_and_shapes():
+    cfg = AppConfig()
+    cfg.vision.grayscale = False
+    cfg.vision.width = 256
+    cfg.vision.height = 256
+    assert cfg.vision.rgb is True
+    assert cfg.vision.channels == 12
+    assert cfg.vision.observation_shape == (12, 256, 256)
+
 
 
 def test_unknown_keys_are_ignored(tmp_path):

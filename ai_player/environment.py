@@ -39,6 +39,7 @@ from .perception import (
     ScreenCapture,
     build_audio_source,
 )
+from .tracker import ControllabilityProbe, EntityKind, EntityTracker
 
 
 class GameEnv(gym.Env):
@@ -77,10 +78,14 @@ class GameEnv(gym.Env):
         self._frames = frame_source or ScreenCapture(self.config.capture)
         self._audio = audio_source or build_audio_source(self.config.audio)
         self._controller = controller or build_controller(self.config.control)
-        self._observer = observer or GameObserver(self.config.reward)
+        self._observer = observer or GameObserver(self.config.reward, hud_config=self.config.hud)
         # Idempotent: build_audio_source already started the recorder it built,
         # but an injected source may not be running yet.
         self._audio.start()
+
+        self._probe = ControllabilityProbe(self.config.tracker)
+        self._entity_tracker = EntityTracker(self.config.tracker)
+        self._probed_avatar = False
 
         self._processor = FrameProcessor(self.config.vision)
         self._stack = FrameStack(self.config.vision)
@@ -149,12 +154,24 @@ class GameEnv(gym.Env):
             time.sleep(env_cfg.reset_delay)
 
         frame = self._wait_for_playable_frame()
+
+        # Autonomous HUD auto-configuration on first playable frame if enabled
+        if self.config.hud.auto_detect and self._observer.detected_hud is None:
+            self._observer.auto_configure_hud(frame)
+
+        # Autonomous Controllability Probe for avatar detection on first episode
+        if self.config.tracker.enabled and self.config.tracker.auto_probe and not self._probed_avatar:
+            self._run_controllability_probe(frame)
+            self._probed_avatar = True
+
         self._stack.reset(self._processor.process(frame))
         # A couple of throwaway frames let start-of-round animations finish, so
         # the stack holds live gameplay rather than a menu.
         for _ in range(max(0, env_cfg.warmup_frames)):
             frame = self._capture_frame()
             self._stack.push(self._processor.process(frame))
+            if self.config.tracker.enabled and self._probe.player_bbox is not None:
+                self._probe.update_player_location(frame)
 
         self._episode_steps = 0
         self._episode_reward = 0.0
@@ -212,6 +229,39 @@ class GameEnv(gym.Env):
         ms_obs = sum(self._prof_obs) / max(1, len(self._prof_obs))
         ms_render = sum(self._prof_render) / max(1, len(self._prof_render))
 
+        # Entity Tracking and Causal Collision Analysis
+        tracked_entities: list[dict[str, Any]] = []
+        collision_events: list[dict[str, Any]] = []
+        player_bbox_dict: dict[str, Any] | None = None
+
+        if self.config.tracker.enabled:
+            # Update player location
+            pbox = self._probe.update_player_location(frame)
+            if pbox is not None:
+                player_bbox_dict = {"x": pbox.x, "y": pbox.y, "w": pbox.w, "h": pbox.h}
+
+            # Update entity tracker
+            entities = self._entity_tracker.update(
+                frame,
+                pbox,
+                score_region=self.config.reward.score_region,
+                game_over_region=self.config.reward.game_over_region,
+            )
+            collision_events = self._entity_tracker.check_collisions(
+                pbox,
+                points_gained=verdict.points,
+                terminated=verdict.terminated,
+            )
+            for e in entities:
+                tracked_entities.append({
+                    "id": e.entity_id,
+                    "kind": e.kind.value,
+                    "bbox": [e.bbox.x, e.bbox.y, e.bbox.w, e.bbox.h],
+                    "vx": e.velocity[0],
+                    "vy": e.velocity[1],
+                    "conf": e.confidence,
+                })
+
         info: dict[str, Any] = {
             "score": verdict.score,
             "points": verdict.points,
@@ -222,6 +272,9 @@ class GameEnv(gym.Env):
             "frame_diff": verdict.frame_diff,
             "is_idle": verdict.is_idle,
             "action": int(action),
+            "player_bbox": player_bbox_dict,
+            "entities": tracked_entities,
+            "collisions": collision_events,
         }
         # Benchmarking telemetry for HUD, diagnostics and logging
         self._last_info = {
@@ -250,10 +303,10 @@ class GameEnv(gym.Env):
         h, w = out.shape[:2]
 
         # Draw ROI boxes
-        boxes = (
+        boxes = [
             (self.config.reward.score_region, (0, 255, 0)),
             (self.config.reward.game_over_region, (0, 0, 255)),
-        )
+        ]
         for region, colour in boxes:
             x1 = max(0, min(region.left, w))
             y1 = max(0, min(region.top, h))
@@ -261,6 +314,56 @@ class GameEnv(gym.Env):
             y2 = max(y1, min(region.top + region.height, h))
             if x2 > x1 and y2 > y1:
                 cv2.rectangle(out, (x1, y1), (x2, y2), colour, 1)
+
+        # Draw detected player avatar BBox and dynamic entities
+        if self.config.tracker.enabled:
+            # Draw Player Avatar
+            p_bbox = self._last_info.get("player_bbox")
+            if p_bbox:
+                px = p_bbox["x"]
+                py = p_bbox["y"]
+                pw = p_bbox["w"]
+                ph = p_bbox["h"]
+                cv2.rectangle(out, (px, py), (px + pw, py + ph), (0, 255, 255), 2)
+                cv2.putText(
+                    out, "PLAYER", (px, max(12, py - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA
+                )
+
+            # Draw tracked foreground entities and threat vectors
+            entities = self._last_info.get("entities", [])
+            for ent in entities:
+                eb = ent.get("bbox", [0, 0, 0, 0])
+                ex, ey, ew, eh = eb[0], eb[1], eb[2], eb[3]
+                ekind = ent.get("kind", "unknown")
+                vx = ent.get("vx", 0.0)
+                vy = ent.get("vy", 0.0)
+
+                if ekind == EntityKind.PROJECTILE.value:
+                    e_color = (0, 69, 255)  # Orange-red
+                    label = "PROJ"
+                elif ekind == EntityKind.THREAT.value:
+                    e_color = (0, 0, 255)  # Red
+                    label = "THREAT"
+                elif ekind == EntityKind.COLLECTIBLE.value:
+                    e_color = (255, 215, 0)  # Gold/Yellow
+                    label = "BONUS"
+                else:
+                    e_color = (200, 200, 200)
+                    label = "OBJ"
+
+                cv2.rectangle(out, (ex, ey), (ex + ew, ey + eh), e_color, 1)
+                cv2.putText(
+                    out, f"{label}#{ent.get('id')}", (ex, max(10, ey - 3)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, e_color, 1, cv2.LINE_AA
+                )
+
+                # Draw velocity/threat motion vector
+                cx = ex + ew // 2
+                cy = ey + eh // 2
+                tip_x = int(cx + vx * 3.0)
+                tip_y = int(cy + vy * 3.0)
+                cv2.arrowedLine(out, (cx, cy), (tip_x, tip_y), e_color, 1, tipLength=0.3)
 
         # Draw semi-transparent telemetry bar at the top
         bar_height = min(112, max(44, h // 3))
@@ -537,6 +640,26 @@ class GameEnv(gym.Env):
             time.sleep(0.05)
             frame = self._frames.grab()
         return frame
+
+    def _run_controllability_probe(self, frame: np.ndarray) -> None:
+        """Inject test actions to probe screen motion and locate the player avatar."""
+        self._probe.record_probe_step("idle", frame)
+        # Probe up to configured probe_actions with available action keys
+        actions_to_probe = [a for a in range(len(self._action_keys)) if self._action_keys[a] is not None]
+        if not actions_to_probe:
+            return
+
+        probe_steps = min(len(actions_to_probe), self.config.tracker.probe_actions)
+        for i in range(probe_steps):
+            act_idx = actions_to_probe[i % len(actions_to_probe)]
+            act_name = format_action(self._action_keys[act_idx])
+            self._controller.act(act_idx)
+            time.sleep(0.05)
+            step_frame = self._capture_frame()
+            self._probe.record_probe_step(act_name, step_frame)
+
+        self._controller.release_all()
+        self._probe.analyze_probes()
 
 
 def make_env(

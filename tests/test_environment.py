@@ -179,4 +179,23 @@ def test_env_tracks_latency_profiler():
         env.close()
 
 
+def test_env_exposes_player_bbox_and_entities():
+    config = mock_config()
+    config.tracker.enabled = True
+    config.tracker.auto_probe = True
+    env = make_env(config, mock=True, render_mode="rgb_array", seed=12)
+    try:
+        _obs, _info = env.reset()
+        _obs, _rew, _term, _trunc, step_info = env.step(0)
+        assert "entities" in step_info
+        assert "collisions" in step_info
+        assert isinstance(step_info["entities"], list)
+        assert isinstance(step_info["collisions"], list)
+        hud = env.render_hud()
+        assert hud is not None
+    finally:
+        env.close()
+
+
+
 

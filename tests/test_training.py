@@ -164,6 +164,29 @@ def test_build_config_accepts_auto_combos_flag():
     assert cfg.control.max_combo_size == 3
 
 
+def test_build_config_accepts_architecture_and_autonomous_flags():
+    args = train_script.parse_args([
+        "--backbone", "convnext",
+        "--rgb",
+        "--resolution", "256",
+        "--features-dim", "1024",
+        "--batch-size", "128",
+        "--auto-hud",
+        "--auto-tracker",
+    ])
+    cfg = train_script.build_config(args)
+    assert cfg.vision.backbone == "convnext"
+    assert cfg.vision.grayscale is False
+    assert cfg.vision.rgb is True
+    assert cfg.vision.width == 256
+    assert cfg.vision.height == 256
+    assert cfg.train.features_dim == 1024
+    assert cfg.train.batch_size == 128
+    assert cfg.hud.auto_detect is True
+    assert cfg.tracker.enabled is True
+
+
+
 def test_console_stats_callback(capsys):
     env = make_env(mock=True, seed=20)
     vec_env = DummyVecEnv([lambda: Monitor(env)])
