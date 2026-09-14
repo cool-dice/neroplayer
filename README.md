@@ -197,9 +197,17 @@ plumbing clearly produces a learning signal the policy can exploit.
 
    The `--render` flag opens a real-time HUD dashboard featuring:
    - **Real Measured FPS** calculated from actual step intervals vs target FPS.
+   - **Real-Time Latency Breakdown Profiler**: Exact milliseconds spent per step across screen capture (`grab`), keyboard action (`act`), image preprocessing (`proc`), audio/obs extraction (`audio/obs`), and HUD drawing (`render`).
    - **Active Action & Full Action Palette** highlighting the current action and multi-key combos.
    - **CNN Real Input (84x84 Grayscale)**: A picture-in-picture inset in the corner showing the exact downscaled observation entering the CNN, along with the 4-frame temporal filmstrip showing how motion and velocity are perceived.
    - **Motion & Stagnation Diff**: Live visual diff percentage and idle state.
+
+   **Benchmarking Pipeline Latency & Bottlenecks**:
+   To diagnose FPS limits before training:
+   ```bash
+   python calibrate.py --config config.json --profile
+   ```
+   This isolates each pipeline stage (screen capture, vision processing, audio FFT, direct input, and OpenCV windowing) and prints exact latencies and the theoretical maximum achievable FPS.
 
    Ctrl+C saves `models/<run>/interrupted.zip`; checkpoints are written every
    `train.checkpoint_every` steps. Resume with

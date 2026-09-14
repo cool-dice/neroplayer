@@ -22,7 +22,7 @@ from pathlib import Path
 from types import FrameType
 
 from stable_baselines3 import DQN, PPO
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
@@ -218,6 +218,54 @@ def wrap_reward_normalisation(
     )
 
 
+class ConsoleStatsCallback(BaseCallback):
+    """Print periodic training telemetry and latency breakdown directly to stdout."""
+
+    def __init__(self, check_freq: int = 100, verbose: int = 0):
+        super().__init__(verbose)
+        self.check_freq = check_freq
+        self._last_time = time.perf_counter()
+        self._last_steps = 0
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.check_freq == 0:
+            now = time.perf_counter()
+            dt = now - self._last_time
+            d_steps = self.num_timesteps - self._last_steps
+            fps = d_steps / dt if dt > 0 else 0.0
+            self._last_time = now
+            self._last_steps = self.num_timesteps
+
+            infos = self.locals.get("infos", [{}])
+            info = infos[0] if infos else {}
+            rew = info.get("episode_reward", 0.0)
+            ep = info.get("episode_index", 0)
+
+            # Extract latency telemetry directly from underlying GameEnv if wrapped
+            lat = {}
+            if self.model is not None:
+                tr_env = self.training_env
+                if hasattr(tr_env, "envs") and tr_env.envs:
+                    sub_env = tr_env.envs[0]
+                    inner_env = getattr(sub_env, "unwrapped", sub_env)
+                    lat = getattr(inner_env, "last_info", {}).get("latency_ms", {})
+            if not lat:
+                lat = info.get("latency_ms", {})
+
+            l_str = (
+                f"grab={lat.get('grab', 0.0):4.1f}ms | act={lat.get('act', 0.0):4.1f}ms | "
+                f"proc={lat.get('proc', 0.0):4.1f}ms | audio={lat.get('obs', 0.0):4.1f}ms | "
+                f"rnd={lat.get('render', 0.0):4.1f}ms"
+                if lat
+                else ""
+            )
+            print(
+                f"[Step {self.num_timesteps:6d} | Ep #{ep:3d}] "
+                f"FPS: {fps:4.1f} | EpRew: {rew:+6.1f} | Latency: {l_str}"
+            )
+        return True
+
+
 def save_run(model, vec_env: DummyVecEnv | VecNormalize, path: Path) -> None:
     """Save the policy, plus the reward statistics needed to resume cleanly."""
     model.save(path)
@@ -334,13 +382,14 @@ def main(argv: list[str] | None = None) -> int:
         save_path=str(model_dir / "checkpoints"),
         name_prefix=config.train.algo,
     )
+    console_stats = ConsoleStatsCallback(check_freq=50)
 
     install_interrupt_handler()
     status = 0
     try:
         model.learn(
             total_timesteps=config.train.total_timesteps,
-            callback=checkpoint,
+            callback=[checkpoint, console_stats],
             reset_num_timesteps=args.resume is None,
             tb_log_name=run_name,
             progress_bar=False,

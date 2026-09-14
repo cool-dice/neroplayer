@@ -164,7 +164,27 @@ def test_build_config_accepts_auto_combos_flag():
     assert cfg.control.max_combo_size == 3
 
 
-def test_main_runs_a_tiny_training_loop(tmp_path, monkeypatch):
+def test_console_stats_callback(capsys):
+    env = make_env(mock=True, seed=20)
+    vec_env = DummyVecEnv([lambda: Monitor(env)])
+    cb = train_script.ConsoleStatsCallback(check_freq=1)
+    cb.init_callback(None)
+    dummy_info = {
+        "episode_reward": 5.0,
+        "episode_index": 1,
+        "latency_ms": {"act": 1.0, "grab": 5.0},
+    }
+    cb.locals = {"infos": [dummy_info]}
+    cb.num_timesteps = 10
+    cb.n_calls = 1
+    assert cb._on_step() is True
+    out = capsys.readouterr().out
+    assert "Step     10" in out
+    assert "Latency: grab= 5.0ms | act= 1.0ms" in out
+    vec_env.close()
+
+
+def test_main_runs_a_tiny_training_loop(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(train_script, "MODELS_DIR", tmp_path / "models")
     monkeypatch.setattr(train_script, "LOGS_DIR", tmp_path / "logs")
 

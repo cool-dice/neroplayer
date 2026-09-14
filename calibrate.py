@@ -51,6 +51,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Validate all configured keys and test pressing them in sequence",
     )
+    mode.add_argument(
+        "--profile",
+        action="store_true",
+        help="Benchmark pipeline latencies (capture, process, audio, render) to diagnose FPS bottleneck",
+    )
     parser.add_argument("--output", type=Path, default=Path("config.json"))
     parser.add_argument("--config", type=Path, default=None, help="Start from an existing config")
     parser.add_argument("--monitor", type=int, default=1, help="mss monitor index (1 = primary)")
@@ -223,6 +228,130 @@ def run_test_keys(config: AppConfig) -> int:
     return 0
 
 
+def run_profile(config: AppConfig, n_samples: int = 50) -> int:
+    """Benchmark each pipeline stage in isolation and report exact milliseconds."""
+    print("\n" + "=" * 65)
+    print(f"PIPELINE LATENCY PROFILER ({n_samples} frames sample)")
+    print("=" * 65)
+
+    # 1. Screen capture benchmark
+    monitor = config.capture.region.as_mss_monitor()
+    print(f"1. Testing screen capture region ({monitor['width']}x{monitor['height']})...")
+    times_grab: list[float] = []
+    frames: list[np.ndarray] = []
+    for _ in range(n_samples):
+        t0 = time.perf_counter()
+        f = grab(monitor)
+        t1 = time.perf_counter()
+        times_grab.append((t1 - t0) * 1000.0)
+        if len(frames) < 10:
+            frames.append(f)
+    avg_grab = sum(times_grab) / len(times_grab)
+    min_grab = min(times_grab)
+    max_grab = max(times_grab)
+    print(f"   -> mss grab: avg = {avg_grab:5.2f} ms  (min {min_grab:.2f}, max {max_grab:.2f})")
+
+    # 2. Vision preprocessing benchmark
+    processor = FrameProcessor(config.vision)
+    test_frame = frames[0]
+    times_proc: list[float] = []
+    for _ in range(n_samples):
+        t0 = time.perf_counter()
+        _ = processor.process(test_frame)
+        t1 = time.perf_counter()
+        times_proc.append((t1 - t0) * 1000.0)
+    avg_proc = sum(times_proc) / len(times_proc)
+    print(f"   -> FrameProcessor resize/grayscale: avg = {avg_proc:5.2f} ms")
+
+    # 3. Audio benchmark (if enabled)
+    avg_audio = 0.0
+    if config.audio.enabled:
+        print("3. Testing Audio feature extraction (FFT / mel-spectrogram)...")
+        from ai_player.perception import AudioFeatureExtractor
+
+        extractor = AudioFeatureExtractor(config.audio)
+        dummy_audio = np.random.uniform(-0.1, 0.1, config.audio.window_samples).astype(np.float32)
+        times_audio: list[float] = []
+        for _ in range(n_samples):
+            t0 = time.perf_counter()
+            _ = extractor.extract(dummy_audio)
+            t1 = time.perf_counter()
+            times_audio.append((t1 - t0) * 1000.0)
+        avg_audio = sum(times_audio) / len(times_audio)
+        print(f"   -> librosa mel-spectrogram on CPU: avg = {avg_audio:5.2f} ms")
+    else:
+        print("3. Audio: DISABLED (--no-audio) -> 0.0 ms")
+
+    # 4. Keyboard action latency
+    avg_act = 0.0
+    print("4. Testing Keyboard controller call overhead...")
+    try:
+        controller = build_controller(config.control, dry_run=False)
+        # Check an active action (e.g. index 1 if available)
+        test_act = 1 if len(config.control.action_keys) > 1 else 0
+        times_act: list[float] = []
+        for _ in range(min(5, n_samples)):
+            t0 = time.perf_counter()
+            controller.act(test_act)
+            t1 = time.perf_counter()
+            times_act.append((t1 - t0) * 1000.0)
+        controller.release_all()
+        avg_act = sum(times_act) / len(times_act)
+        print(f"   -> pydirectinput controller overhead: avg = {avg_act:5.2f} ms")
+    except Exception as exc:
+        print(f"   -> pydirectinput skipped ({exc})")
+
+    # 5. OpenCV imshow / waitKey render overhead benchmark
+    print("5. Testing OpenCV render overhead (imshow + waitKey(1))...")
+    times_rnd: list[float] = []
+    try:
+        dummy_display = frames[0].copy()
+        cv2.imshow("latency_test", dummy_display)
+        cv2.waitKey(1)
+        for _ in range(n_samples):
+            t0 = time.perf_counter()
+            cv2.imshow("latency_test", dummy_display)
+            cv2.waitKey(1)
+            t1 = time.perf_counter()
+            times_rnd.append((t1 - t0) * 1000.0)
+        cv2.destroyWindow("latency_test")
+        avg_rnd = sum(times_rnd) / len(times_rnd)
+        print(f"   -> cv2.imshow + waitKey(1): avg = {avg_rnd:5.2f} ms")
+    except Exception as exc:
+        avg_rnd = 0.0
+        print(f"   -> OpenCV display skipped ({exc})")
+
+    # Summary and calculation
+    total_ms = avg_grab + avg_proc + avg_audio + avg_act + avg_rnd
+    max_possible_fps = 1000.0 / max(0.1, total_ms)
+    print("=" * 65)
+    print("LATENCY BREAKDOWN:")
+    print(f"   Screen Capture (mss)   : {avg_grab:6.2f} ms")
+    print(f"   Vision Proc (84x84)    : {avg_proc:6.2f} ms")
+    print(f"   Audio Extraction       : {avg_audio:6.2f} ms")
+    print(f"   Keyboard Action        : {avg_act:6.2f} ms")
+    print(f"   OpenCV Window/Render   : {avg_rnd:6.2f} ms")
+    print("   --------------------------------------")
+    print(f"   TOTAL ESTIMATED STEP   : {total_ms:6.2f} ms")
+    print(f"   MAX THEORETICAL FPS    : {max_possible_fps:6.1f} FPS")
+    print("=" * 65)
+
+    if avg_rnd > 12.0:
+        print(">> BOTTLENECK DETECTED: cv2.waitKey(1) on Windows takes ~15-16ms (timer quantization).")
+        print("   Recommendation: run without `--render` for maximum training speed.")
+    if avg_act > 15.0:
+        print(">> BOTTLENECK DETECTED: Keyboard tap_duration or pydirectinput overhead is >15ms.")
+        print("   Recommendation: lower `tap_duration` in config.json or use `hold_keys: true`.")
+    if avg_audio > 15.0:
+        print(">> BOTTLENECK DETECTED: Audio extraction is taking significant CPU time.")
+        print("   Recommendation: run with `--no-audio` to recover full FPS.")
+    if avg_grab > 35.0:
+        print(">> BOTTLENECK DETECTED: Screen capture is slow (mss taking >35ms).")
+        print("   Recommendation: reduce game window resolution or capture region size.")
+    print()
+    return 0
+
+
 def run_live(config: AppConfig) -> int:
     """Show the 84x84 grayscale observation the CNN actually receives."""
     processor = FrameProcessor(config.vision)
@@ -335,6 +464,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_live(config)
         if args.test_keys:
             return run_test_keys(config)
+        if args.profile:
+            return run_profile(config)
         return run_pick(args, config)
     except RuntimeError as exc:
         print(exc)

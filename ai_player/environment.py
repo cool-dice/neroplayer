@@ -105,6 +105,12 @@ class GameEnv(gym.Env):
         self._last_step_time = 0.0
         self._fps_history: deque[float] = deque(maxlen=30)
         self._real_fps = 0.0
+        # Latency breakdown (rolling ms)
+        self._prof_act: deque[float] = deque(maxlen=30)
+        self._prof_grab: deque[float] = deque(maxlen=30)
+        self._prof_proc: deque[float] = deque(maxlen=30)
+        self._prof_obs: deque[float] = deque(maxlen=30)
+        self._prof_render: deque[float] = deque(maxlen=30)
         self._episode_steps = 0
         self._episode_reward = 0.0
         self._episode_index = 0
@@ -115,6 +121,11 @@ class GameEnv(gym.Env):
     def last_frame(self) -> np.ndarray | None:
         """The most recently captured frame, in BGR, before preprocessing."""
         return None if self._last_frame is None else self._last_frame.copy()
+
+    @property
+    def last_info(self) -> dict[str, Any]:
+        """Telemetry and metrics from the most recent step or reset."""
+        return dict(self._last_info)
 
     # -- gymnasium API -------------------------------------------------------
     def reset(
@@ -166,12 +177,20 @@ class GameEnv(gym.Env):
                 self._real_fps = len(self._fps_history) / sum(self._fps_history)
         self._last_step_time = now
 
+        t0 = time.perf_counter()
         self._controller.act(int(action))
+        t1 = time.perf_counter()
+        self._prof_act.append((t1 - t0) * 1000.0)
+
         frame = self._capture_frame()
         self._last_frame = frame
+        t2 = time.perf_counter()
+        self._prof_grab.append((t2 - t1) * 1000.0)
 
         self._stack.push(self._processor.process(frame))
         verdict = self._observer.evaluate(frame)
+        t3 = time.perf_counter()
+        self._prof_proc.append((t3 - t2) * 1000.0)
 
         self._episode_steps += 1
         self._episode_reward += verdict.reward
@@ -181,6 +200,17 @@ class GameEnv(gym.Env):
             # Never leave a key held across an episode boundary; the game would
             # receive phantom input during the restart sequence.
             self._controller.release_all()
+
+        t_obs0 = time.perf_counter()
+        obs = self._observation()
+        t_obs1 = time.perf_counter()
+        self._prof_obs.append((t_obs1 - t_obs0) * 1000.0)
+
+        ms_act = sum(self._prof_act) / max(1, len(self._prof_act))
+        ms_grab = sum(self._prof_grab) / max(1, len(self._prof_grab))
+        ms_proc = sum(self._prof_proc) / max(1, len(self._prof_proc))
+        ms_obs = sum(self._prof_obs) / max(1, len(self._prof_obs))
+        ms_render = sum(self._prof_render) / max(1, len(self._prof_render))
 
         info: dict[str, Any] = {
             "score": verdict.score,
@@ -192,12 +222,27 @@ class GameEnv(gym.Env):
             "frame_diff": verdict.frame_diff,
             "is_idle": verdict.is_idle,
             "action": int(action),
-            "real_fps": self._real_fps,
         }
-        self._last_info = info
+        # Benchmarking telemetry for HUD, diagnostics and logging
+        self._last_info = {
+            **info,
+            "real_fps": self._real_fps,
+            "latency_ms": {
+                "act": ms_act,
+                "grab": ms_grab,
+                "proc": ms_proc,
+                "obs": ms_obs,
+                "render": ms_render,
+            },
+        }
+
         if self.render_mode == "human":
+            tr0 = time.perf_counter()
             self.render()
-        return self._observation(), float(verdict.reward), bool(verdict.terminated), truncated, info
+            tr1 = time.perf_counter()
+            self._prof_render.append((tr1 - tr0) * 1000.0)
+
+        return obs, float(verdict.reward), bool(verdict.terminated), truncated, info
 
     def _draw_hud(self, frame: np.ndarray) -> np.ndarray:
         """Overlay telemetry, action palette, and CNN vision inset for human preview."""
@@ -218,7 +263,7 @@ class GameEnv(gym.Env):
                 cv2.rectangle(out, (x1, y1), (x2, y2), colour, 1)
 
         # Draw semi-transparent telemetry bar at the top
-        bar_height = min(96, max(44, h // 3))
+        bar_height = min(112, max(44, h // 3))
         overlay = out.copy()
         cv2.rectangle(overlay, (0, 0), (w, bar_height), (18, 18, 18), -1)
         cv2.addWeighted(overlay, 0.75, out, 0.25, 0, out)
@@ -307,13 +352,35 @@ class GameEnv(gym.Env):
             cv2.LINE_AA,
         )
 
-        # Line 4: Game Over confidence & Region key
+        # Line 4: Latency breakdown profiler
+        lat = self._last_info.get("latency_ms", {})
+        l_act = lat.get("act", 0.0)
+        l_grab = lat.get("grab", 0.0)
+        l_proc = lat.get("proc", 0.0)
+        l_obs = lat.get("obs", 0.0)
+        l_rnd = lat.get("render", 0.0)
+        lat_text = (
+            f"LATENCY(ms): grab={l_grab:4.1f} | act={l_act:4.1f} | "
+            f"proc={l_proc:4.1f} | audio/obs={l_obs:4.1f} | render={l_rnd:4.1f}"
+        )
+        cv2.putText(
+            out,
+            lat_text,
+            (10, 84),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (255, 180, 50),
+            1,
+            cv2.LINE_AA,
+        )
+
+        # Line 5: Game Over confidence & Region key
         cv2.putText(
             out,
             f"GAME OVER CONF: {go_conf:4.2f} | BOXES: [GREEN=SCORE, RED=OVER]",
-            (10, 84),
+            (10, 102),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.40,
+            0.38,
             (180, 180, 180),
             1,
             cv2.LINE_AA,
@@ -442,7 +509,13 @@ class GameEnv(gym.Env):
         if self._frame_period:
             remaining = self._next_frame_at - time.perf_counter()
             if remaining > 0:
-                time.sleep(remaining)
+                # Use busy-wait spinloop for remaining fractions of milliseconds
+                # because time.sleep() on Windows quantizes to 15.6ms!
+                target = self._next_frame_at
+                if remaining > 0.002:
+                    time.sleep(remaining - 0.002)
+                while time.perf_counter() < target:
+                    pass
                 self._next_frame_at += self._frame_period
             else:
                 # We fell behind (slow game, GC pause): resynchronise instead of

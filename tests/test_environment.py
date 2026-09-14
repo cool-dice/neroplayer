@@ -149,15 +149,34 @@ def test_env_tracks_real_fps_and_renders_hud_details():
         env.reset()
         for action in range(4):
             _obs, _rew, _term, _trunc, info = env.step(action)
-            assert "real_fps" in info
-            assert isinstance(info["real_fps"], float)
             assert "action" in info
             assert info["action"] == action
+            assert env.last_info["real_fps"] >= 0.0
 
         hud = env.render_hud()
         assert hud is not None
         assert hud.shape == (config.capture.region.height, config.capture.region.width, 3)
     finally:
         env.close()
+
+
+def test_env_tracks_latency_profiler():
+    config = mock_config()
+    env = make_env(config, mock=True, render_mode="rgb_array", seed=11)
+    try:
+        env.reset()
+        _obs, _rew, _term, _trunc, _info = env.step(0)
+        assert "latency_ms" in env.last_info
+        lat = env.last_info["latency_ms"]
+        assert "grab" in lat
+        assert "act" in lat
+        assert "proc" in lat
+        assert "obs" in lat
+        assert "render" in lat
+        assert isinstance(lat["grab"], float)
+        assert isinstance(lat["act"], float)
+    finally:
+        env.close()
+
 
 
