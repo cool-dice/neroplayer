@@ -132,8 +132,11 @@ def test_render_returns_rgb_frames():
         env.reset()
         env.step(0)
         frame = env.render()
+        hud = env.render_hud()
     finally:
         env.close()
 
     region = env.config.capture.region
     assert frame.shape == (region.height, region.width, 3)
+    assert hud.shape == (region.height, region.width, 3)
+

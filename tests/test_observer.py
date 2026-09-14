@@ -251,3 +251,32 @@ def test_observer_handles_an_empty_detection_region(reward):
     verdict = observer.evaluate(playing_frame())
 
     assert verdict.terminated is False
+
+
+def test_observer_detects_idle_and_applies_penalty(reward):
+    reward.idle_diff_threshold = 0.05
+    reward.idle_penalty = -0.5
+    reward.movement_reward = 0.2
+    observer = GameObserver(reward, score_signal=PixelChangeScoreSignal(reward))
+    observer.reset()
+
+    # Frame 1 primes the baseline; diff is 1.0 (moving)
+    f1 = np.full((100, 100, 3), 120, dtype=np.uint8)
+    v1 = observer.evaluate(f1)
+    assert v1.is_idle is False
+    assert v1.reward == pytest.approx(reward.step_reward + reward.movement_reward)
+
+    # Frame 2 is identical -> diff is 0.0 -> idle detected -> penalty applied
+    f2 = f1.copy()
+    v2 = observer.evaluate(f2)
+    assert v2.is_idle is True
+    assert v2.frame_diff < 0.05
+    assert v2.reward == pytest.approx(reward.step_reward + reward.idle_penalty)
+
+    # Frame 3 changes significantly -> moving again -> movement reward applied
+    f3 = np.full((100, 100, 3), 200, dtype=np.uint8)
+    v3 = observer.evaluate(f3)
+    assert v3.is_idle is False
+    assert v3.frame_diff > 0.05
+    assert v3.reward == pytest.approx(reward.step_reward + reward.movement_reward)
+

@@ -182,6 +182,17 @@ class RewardConfig:
     # identically on the bundled game.
     pixel_change_ratio: float = 0.05
 
+    # --- Stagnation / Idle detection -----------------------------------------
+    # When consecutive frames have high similarity (e.g. > 90% identical / low delta),
+    # the scene is standing still (player is idling/stuck).
+    # idle_diff_threshold: normalized mean absolute pixel change below which
+    # the frame is considered stagnant/idle (e.g. 0.05 = 95% similarity).
+    idle_diff_threshold: float = 0.05
+    # Penalty applied when the scene is standing still (negative float, e.g. -0.1).
+    idle_penalty: float = 0.0
+    # Bonus reward applied when the scene is actively moving/progressing.
+    movement_reward: float = 0.0
+
 
 @dataclass
 class EnvConfig:

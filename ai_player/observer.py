@@ -306,6 +306,8 @@ class FrameVerdict:
     points: float = 0.0
     score: int | None = None
     game_over_confidence: float = 0.0
+    frame_diff: float = 0.0
+    is_idle: bool = False
     info: dict[str, float] = field(default_factory=dict)
 
 
@@ -328,6 +330,7 @@ class GameObserver:
         self._score = score_signal or build_score_signal(reward)
         self._streak = 0
         self._episode_points = 0.0
+        self._last_frame_gray: np.ndarray | None = None
 
     @property
     def episode_points(self) -> float:
@@ -336,17 +339,31 @@ class GameObserver:
     def reset(self) -> None:
         self._streak = 0
         self._episode_points = 0.0
+        self._last_frame_gray = None
         self._score.reset()
 
     def is_game_over(self, frame: BGRFrame) -> bool:
         """Single-frame, non-debounced check. Used while waiting for a restart."""
         return self._game_over.detect(frame)[0]
 
+    def _compute_frame_diff(self, frame: BGRFrame) -> float:
+        """Calculate normalized mean absolute pixel change against the previous frame [0.0, 1.0]."""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        if self._last_frame_gray is None or self._last_frame_gray.shape != gray.shape:
+            self._last_frame_gray = gray
+            return 1.0  # first frame is considered new/active
+        diff = float(cv2.absdiff(gray, self._last_frame_gray).mean()) / 255.0
+        self._last_frame_gray = gray
+        return diff
+
     def evaluate(self, frame: BGRFrame) -> FrameVerdict:
         """Turn a frame into reward + termination."""
         detected, confidence = self._game_over.detect(frame)
         self._streak = self._streak + 1 if detected else 0
         terminated = self._streak >= max(1, self._reward.detection_patience)
+
+        frame_diff = self._compute_frame_diff(frame)
+        is_idle = frame_diff < self._reward.idle_diff_threshold
 
         if terminated:
             # No score reward on the terminal frame: the game-over overlay
@@ -355,17 +372,39 @@ class GameObserver:
                 reward=self._reward.game_over_penalty,
                 terminated=True,
                 game_over_confidence=confidence,
-                info={"game_over": 1.0},
+                frame_diff=frame_diff,
+                is_idle=is_idle,
+                info={
+                    "game_over": 1.0,
+                    "frame_diff": frame_diff,
+                    "is_idle": 1.0 if is_idle else 0.0,
+                },
             )
 
         points, score = self._score.update(frame)
         self._episode_points += points
+
+        # Base step reward + points reward
         reward = self._reward.step_reward + self._reward.score_reward * points
+
+        # Stagnation penalty or movement reward based on visual motion
+        if is_idle:
+            reward += self._reward.idle_penalty
+        else:
+            reward += self._reward.movement_reward
+
         return FrameVerdict(
             reward=float(reward),
             terminated=False,
             points=points,
             score=score,
             game_over_confidence=confidence,
-            info={"game_over": 0.0, "points": points},
+            frame_diff=frame_diff,
+            is_idle=is_idle,
+            info={
+                "game_over": 0.0,
+                "points": points,
+                "frame_diff": frame_diff,
+                "is_idle": 1.0 if is_idle else 0.0,
+            },
         )

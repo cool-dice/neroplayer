@@ -147,6 +147,16 @@ def test_check_env_validates_the_environment():
     assert train_script.main(["--mock", "--check-env"]) == 0
 
 
+def test_build_config_accepts_idle_and_movement_flags():
+    args = train_script.parse_args(
+        ["--idle-penalty", "-0.25", "--movement-reward", "0.1", "--idle-diff-threshold", "0.08"]
+    )
+    cfg = train_script.build_config(args)
+    assert cfg.reward.idle_penalty == -0.25
+    assert cfg.reward.movement_reward == 0.1
+    assert cfg.reward.idle_diff_threshold == 0.08
+
+
 def test_main_runs_a_tiny_training_loop(tmp_path, monkeypatch):
     monkeypatch.setattr(train_script, "MODELS_DIR", tmp_path / "models")
     monkeypatch.setattr(train_script, "LOGS_DIR", tmp_path / "logs")

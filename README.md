@@ -186,11 +186,17 @@ There is no score API, so the critic infers everything from the frame:
 ```
 reward = step_reward                    # +0.1 survival drip, dense signal
        + score_reward * points_gained   # +10 per detected point
+       + idle_penalty if is_idle        # negative penalty when the scene is standing still
+       + movement_reward if moving      # positive reward when screen pixels change
        + game_over_penalty  if dead     # -100, dominates the return
 ```
 
 - **Survival drip** gives PPO a gradient before it has ever scored. Without it
   the reward is sparse enough that early learning stalls.
+- **Stagnation detection** measures consecutive full-frame pixel changes. If the
+  screen changes by less than `idle_diff_threshold` (e.g. 0.05 = 95% similarity),
+  the player is stationary and `idle_penalty` is applied; otherwise `movement_reward`
+  encourages forward movement and exploration.
 - **Score detection** prefers OCR (`--psm 7`, digits whitelisted) because it
   yields a real delta. Implausible jumps (`7 → 771`) and counter resets are
   ignored rather than rewarded or punished. The fallback thresholds the score

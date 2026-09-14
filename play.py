@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
                 total += reward
                 steps += 1
                 done = terminated or truncated
-                recorder.write(env.last_frame)
+                recorder.write(env.render_hud() if hasattr(env, "render_hud") else env.last_frame)
             returns.append(total)
             lengths.append(steps)
             points.append(float(info.get("episode_points", 0.0)))

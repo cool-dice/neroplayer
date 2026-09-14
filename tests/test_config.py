@@ -24,6 +24,9 @@ def test_config_survives_a_json_round_trip(tmp_path):
     config = mock_config()
     config.capture.region = Region(left=12, top=34, width=640, height=480)
     config.reward.game_over_penalty = -50.0
+    config.reward.idle_penalty = -0.2
+    config.reward.movement_reward = 0.05
+    config.reward.idle_diff_threshold = 0.1
     config.train.algo = "dqn"
 
     restored = load_config(config.save(tmp_path / "config.json"))
@@ -32,6 +35,9 @@ def test_config_survives_a_json_round_trip(tmp_path):
     assert restored.reward.game_over_region == config.reward.game_over_region
     assert restored.reward.game_over_color_bgr == config.reward.game_over_color_bgr
     assert restored.reward.game_over_penalty == -50.0
+    assert restored.reward.idle_penalty == -0.2
+    assert restored.reward.movement_reward == 0.05
+    assert restored.reward.idle_diff_threshold == 0.1
     assert restored.train.algo == "dqn"
 
 

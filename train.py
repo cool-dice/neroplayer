@@ -62,7 +62,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Train on raw reward magnitudes instead of normalising them (PPO)",
     )
-    parser.add_argument("--render", action="store_true", help="Show the captured frames in a window")
+    parser.add_argument(
+        "--idle-penalty",
+        type=float,
+        default=None,
+        help="Negative penalty when consecutive frames change less than --idle-diff-threshold",
+    )
+    parser.add_argument(
+        "--movement-reward",
+        type=float,
+        default=None,
+        help="Bonus reward when consecutive frames change by at least --idle-diff-threshold",
+    )
+    parser.add_argument(
+        "--idle-diff-threshold",
+        type=float,
+        default=None,
+        help="Pixel diff ratio below which the agent is considered idle/stagnant (e.g. 0.05 = 5%% change)",
+    )
+    parser.add_argument(
+        "--render", action="store_true", help="Show the captured frames in a window with HUD overlay"
+    )
     parser.add_argument(
         "--check-env",
         action="store_true",
@@ -94,6 +114,12 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.audio.enabled = False
     if args.no_reward_norm:
         config.train.normalize_reward = False
+    if args.idle_penalty is not None:
+        config.reward.idle_penalty = args.idle_penalty
+    if args.movement_reward is not None:
+        config.reward.movement_reward = args.movement_reward
+    if args.idle_diff_threshold is not None:
+        config.reward.idle_diff_threshold = args.idle_diff_threshold
     return config
 
 

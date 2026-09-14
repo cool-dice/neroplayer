@@ -99,6 +99,7 @@ class GameEnv(gym.Env):
         self._frame_period = 1.0 / self.config.env.target_fps if self.config.env.target_fps else 0.0
         self._next_frame_at = 0.0
         self._last_frame: np.ndarray | None = None
+        self._last_info: dict[str, Any] = {}
         self._episode_steps = 0
         self._episode_reward = 0.0
         self._episode_index = 0
@@ -172,19 +173,104 @@ class GameEnv(gym.Env):
             "episode_steps": self._episode_steps,
             "episode_reward": self._episode_reward,
             "game_over_confidence": verdict.game_over_confidence,
+            "frame_diff": verdict.frame_diff,
+            "is_idle": verdict.is_idle,
             "action": int(action),
         }
+        self._last_info = info
         if self.render_mode == "human":
             self.render()
         return self._observation(), float(verdict.reward), bool(verdict.terminated), truncated, info
 
+    def _draw_hud(self, frame: np.ndarray) -> np.ndarray:
+        """Overlay telemetry and action info onto the frame for human preview."""
+        out = frame.copy()
+        h, w = out.shape[:2]
+
+        # Draw ROI boxes
+        boxes = (
+            (self.config.reward.score_region, (0, 255, 0)),
+            (self.config.reward.game_over_region, (0, 0, 255)),
+        )
+        for region, colour in boxes:
+            x1 = max(0, min(region.left, w))
+            y1 = max(0, min(region.top, h))
+            x2 = max(x1, min(region.left + region.width, w))
+            y2 = max(y1, min(region.top + region.height, h))
+            if x2 > x1 and y2 > y1:
+                cv2.rectangle(out, (x1, y1), (x2, y2), colour, 1)
+
+        # Draw semi-transparent telemetry bar at the top or bottom
+        bar_height = 80
+        overlay = out.copy()
+        cv2.rectangle(overlay, (0, 0), (w, bar_height), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.7, out, 0.3, 0, out)
+
+        action_idx = self._last_info.get("action")
+        keys = self.config.control.action_keys
+        if action_idx is not None and 0 <= action_idx < len(keys):
+            key_name = keys[action_idx]
+            action_text = f"ACTION: [{key_name if key_name is not None else 'IDLE/NONE'}]"
+        else:
+            action_text = "ACTION: --"
+
+        ep_rew = self._last_info.get("episode_reward", 0.0)
+        ep_step = self._last_info.get("episode_steps", 0)
+        points = self._last_info.get("episode_points", 0.0)
+        frame_diff = self._last_info.get("frame_diff", 0.0)
+        is_idle = self._last_info.get("is_idle", False)
+        go_conf = self._last_info.get("game_over_confidence", 0.0)
+
+        # Status text lines
+        status_color = (0, 0, 255) if is_idle else (0, 255, 0)
+        motion_status = "STAGNANT / IDLE" if is_idle else "ACTIVE MOTION"
+
+        cv2.putText(
+            out,
+            f"EP #{self._episode_index} | STEP: {ep_step:4d} | REWARD: {ep_rew:+6.1f} | PTS: {points:.0f}",
+            (10, 22),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            out,
+            f"{action_text} | DIFF: {frame_diff * 100:4.1f}% [{motion_status}]",
+            (10, 48),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            status_color,
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            out,
+            f"GAME OVER CONF: {go_conf:4.2f} | FPS TARGET: {self.config.env.target_fps:.1f}",
+            (10, 72),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.50,
+            (200, 200, 200),
+            1,
+            cv2.LINE_AA,
+        )
+        return out
+
+    def render_hud(self) -> np.ndarray | None:
+        """Return the current frame with the HUD telemetry overlay drawn on it."""
+        if self._last_frame is None:
+            return None
+        return self._draw_hud(self._last_frame)
+
     def render(self) -> np.ndarray | None:
         if self._last_frame is None:
             return None
+        hud_frame = self._draw_hud(self._last_frame)
         if self.render_mode == "rgb_array":
-            return cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2RGB)
+            return cv2.cvtColor(hud_frame, cv2.COLOR_BGR2RGB)
         if self.render_mode == "human":  # pragma: no cover - needs a display
-            cv2.imshow(self._window_name, self._last_frame)
+            cv2.imshow(self._window_name, hud_frame)
             cv2.waitKey(1)
             self._window_open = True
         return None

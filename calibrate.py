@@ -141,6 +141,17 @@ def run_check(args: argparse.Namespace, config: AppConfig) -> int:
     detected, confidence = build_game_over_detector(config.reward).detect(frame)
     print(f"Game over detected    : {detected}  (confidence {confidence:.3f})")
 
+    # Check frame difference against a second frame 0.5s later
+    time.sleep(0.5)
+    second_frame = grab(config.capture.region.as_mss_monitor())
+    gray1 = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor(second_frame, cv2.COLOR_BGR2GRAY)
+    motion_diff = float(cv2.absdiff(gray1, gray2).mean()) / 255.0
+    is_idle = motion_diff < config.reward.idle_diff_threshold
+    thresh_pct = config.reward.idle_diff_threshold * 100.0
+    print(f"Motion diff (0.5s)    : {motion_diff * 100:.2f}% (Threshold: {thresh_pct:.1f}%)")
+    print(f"Motion state          : {'STAGNANT / IDLE' if is_idle else 'ACTIVE MOTION'}")
+
     signal = build_score_signal(config.reward)
     signal.update(frame)  # first call only primes the baseline
     time.sleep(1.0)
