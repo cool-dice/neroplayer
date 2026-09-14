@@ -275,12 +275,12 @@ The agent supports fully autonomous zero-shot adaptation across four core pillar
   when a game awards several points in one frame, which is what OCR is for.
   Either path thresholds the box so the digits are the non-zero pixels, so a
   dark-on-light HUD reads the same as a light-on-dark one.
-- **Termination** without a template asks "what fraction of the game-over
-  region is the banner colour?", requiring a match on every channel. The
-  obvious alternative — compare the region's *mean* colour to the banner —
-  looks equivalent and is not: two near-matching channels dilute the one that
-  is far off, and red obstacles drifting through the region ended 7% of live
-  gameplay frames on the bundled game, each costing a full death penalty.
+- **Autonomous Game Over Detection**:
+  When no template is supplied, `AutonomousGameOverDetector` automatically runs:
+  1. Multi-scale Canny edge template correlation against synthetic text masks ("GAME OVER", "CONTINUE"), invariant to font color and style.
+  2. Fast text & OCR keyword scanning across high-contrast luminance and chroma channels ("GAME OVER", "CONTINUE", "YOU DIED", "DEFEAT", "MISSION FAILED", "TRY AGAIN").
+  3. Center screen blackout and fade detection with stationary low-delta motion.
+  4. Color matching fallback for calibrated solid banners.
 - **Template matching** uses normalised correlation, except when the saved
   template has no variance at all. Correlation is undefined for a flat image:
   OpenCV returns 0.0 for a perfect match on a solid colour block exactly as it
@@ -289,6 +289,14 @@ The agent supports fully autonomous zero-shot adaptation across four core pillar
 - **Termination is also debounced** over `detection_patience` consecutive
   frames. A one-frame false positive would end the episode and poison the
   return, so this matters more than it looks.
+
+## Universal Input & Action Space (Keyboard + Mouse Hybrid)
+
+To support 3D FPS, RTS, and racing titles, `ControlConfig` supports both keyboard and mouse:
+- **Mouse Modes**: `"relative"` for 3D camera turns (`aim_step`, `mouse_sensitivity`), `"absolute"` for cursor clicking and dragging.
+- **Compound Actions**: e.g. `"w+mouse_left"`, `"aim_left"`, `"aim_up+fire"`, `["w", "space", "mouse_left"]`.
+- **UnifiedInputController**: Seamlessly handles tap and hold modes across keys and mouse buttons, releasing all inputs on reset or termination.
+- **OpenAI & LM Studio VLM Support**: `VLMObserverInterface` supports `/v1/chat/completions` payload format with base64 `image_url` for seamless integration with local models (Qwen2.5-VL 8B) loaded in LM Studio.
 
 ## Tuning that actually moves the needle
 
