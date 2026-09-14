@@ -290,11 +290,12 @@ class MockAudioSource:
 
 
 class MockController:
-    """Sends the agent's key presses straight into the simulation."""
+    """Sends the agent's key presses and mouse actions straight into the simulation."""
 
     def __init__(self, game: MockArcadeGame, action_keys: list[Any]) -> None:
         self._game = game
         self._action_keys = action_keys
+        self.mouse_events: list[dict[str, Any]] = []
 
     def act(self, action: int) -> None:
         if not 0 <= int(action) < len(self._action_keys):
@@ -304,10 +305,20 @@ class MockController:
             self._game.press(None)
         else:
             for k in keys:
-                self._game.press(k)
+                lower = k.lower()
+                from .controls import MOUSE_AIM_ACTIONS, MOUSE_CLICK_ACTIONS
+
+                if lower in MOUSE_CLICK_ACTIONS:
+                    self.mouse_events.append({"type": "click", "button": MOUSE_CLICK_ACTIONS[lower]})
+                elif lower in MOUSE_AIM_ACTIONS:
+                    dx, dy = MOUSE_AIM_ACTIONS[lower]
+                    self.mouse_events.append({"type": "move_rel", "dx": dx, "dy": dy})
+                else:
+                    self._game.press(k)
 
     def restart(self) -> None:
         self._game.restart()
+        self.mouse_events.clear()
 
     def release_all(self) -> None:
         return None

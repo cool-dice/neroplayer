@@ -28,7 +28,13 @@ import numpy as np
 from gymnasium import spaces
 
 from .config import AppConfig
-from .controls import ActionController, build_controller, format_action, get_effective_action_keys
+from .controls import (
+    ActionController,
+    build_controller,
+    format_action,
+    get_effective_action_keys,
+    parse_action_keys,
+)
 from .observer import GameObserver
 from .perception import (
     AudioFeatureExtractor,
@@ -262,6 +268,21 @@ class GameEnv(gym.Env):
                     "conf": e.confidence,
                 })
 
+        # Determine active mouse action details for telemetry
+        action_idx_val = int(action)
+        mouse_active_info: dict[str, Any] = {"aim": (0, 0), "clicks": []}
+        if 0 <= action_idx_val < len(self._action_keys):
+            for t in parse_action_keys(self._action_keys[action_idx_val]):
+                tl = t.lower()
+                from .controls import MOUSE_AIM_ACTIONS, MOUSE_CLICK_ACTIONS
+
+                if tl in MOUSE_AIM_ACTIONS:
+                    step_u = MOUSE_AIM_ACTIONS[tl]
+                    s_step = self.config.control.aim_step
+                    mouse_active_info["aim"] = (step_u[0] * s_step, step_u[1] * s_step)
+                elif tl in MOUSE_CLICK_ACTIONS:
+                    mouse_active_info["clicks"].append(MOUSE_CLICK_ACTIONS[tl])
+
         info: dict[str, Any] = {
             "score": verdict.score,
             "points": verdict.points,
@@ -272,6 +293,7 @@ class GameEnv(gym.Env):
             "frame_diff": verdict.frame_diff,
             "is_idle": verdict.is_idle,
             "action": int(action),
+            "mouse": mouse_active_info,
             "player_bbox": player_bbox_dict,
             "entities": tracked_entities,
             "collisions": collision_events,
@@ -373,11 +395,26 @@ class GameEnv(gym.Env):
 
         action_idx = self._last_info.get("action")
         keys = self._action_keys
+        active_tokens: tuple[str, ...] = ()
         if action_idx is not None and 0 <= action_idx < len(keys):
+            active_tokens = parse_action_keys(keys[action_idx])
             action_name = format_action(keys[action_idx])
             action_text = f"ACTIVE [{action_idx}]: [{action_name}]"
         else:
             action_text = "ACTIVE: --"
+
+        # Check for mouse actions in active action
+        mouse_parts = []
+        for token in active_tokens:
+            lower = token.lower()
+            from .controls import MOUSE_AIM_ACTIONS, MOUSE_CLICK_ACTIONS
+
+            if lower in MOUSE_CLICK_ACTIONS:
+                mouse_parts.append(f"CLICK({MOUSE_CLICK_ACTIONS[lower].upper()})")
+            elif lower in MOUSE_AIM_ACTIONS:
+                dx, dy = MOUSE_AIM_ACTIONS[lower]
+                mouse_parts.append(f"AIM({dx:+d},{dy:+d})")
+        mouse_telemetry = f" | MOUSE: {', '.join(mouse_parts)}" if mouse_parts else ""
 
         ep_rew = self._last_info.get("episode_reward", 0.0)
         ep_step = self._last_info.get("episode_steps", 0)
@@ -412,10 +449,10 @@ class GameEnv(gym.Env):
             cv2.LINE_AA,
         )
 
-        # Line 2: Active action & Motion Status
+        # Line 2: Active action, Mouse Telemetry & Motion Status
         cv2.putText(
             out,
-            f"{action_text} | DIFF: {frame_diff * 100:4.1f}% [{motion_status}]",
+            f"{action_text}{mouse_telemetry} | DIFF: {frame_diff * 100:4.1f}% [{motion_status}]",
             (10, 42),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.50,

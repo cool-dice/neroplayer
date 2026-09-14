@@ -50,7 +50,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     mode.add_argument(
         "--test-keys",
         action="store_true",
-        help="Validate all configured keys and test pressing them in sequence",
+        help="Validate all configured actions/keys and test pressing them in sequence",
     )
     mode.add_argument(
         "--profile",
@@ -223,7 +223,7 @@ def run_test_keys(config: AppConfig) -> int:
     try:
         controller = build_controller(config.control, dry_run=False)
     except Exception as exc:
-        print(f"\nNote: Live key testing requires Windows and pydirectinput ({exc}).")
+        print(f"\nNote: Live input testing requires Windows and pydirectinput ({exc}).")
         return 0
 
     print("\nStarting live key test in 3 seconds -- focus your game window!")
@@ -301,9 +301,9 @@ def run_profile(config: AppConfig, n_samples: int = 50) -> int:
     else:
         print("3. Audio: DISABLED (--no-audio) -> 0.0 ms")
 
-    # 4. Keyboard action latency
+    # 4. Input action latency
     avg_act = 0.0
-    print("4. Testing Keyboard controller call overhead...")
+    print("4. Testing Input controller call overhead...")
     try:
         controller = build_controller(config.control, dry_run=False)
         # Check an active action (e.g. index 1 if available)
@@ -316,9 +316,9 @@ def run_profile(config: AppConfig, n_samples: int = 50) -> int:
             times_act.append((t1 - t0) * 1000.0)
         controller.release_all()
         avg_act = sum(times_act) / len(times_act)
-        print(f"   -> pydirectinput controller overhead: avg = {avg_act:5.2f} ms")
+        print(f"   -> input controller overhead: avg = {avg_act:5.2f} ms")
     except Exception as exc:
-        print(f"   -> pydirectinput skipped ({exc})")
+        print(f"   -> input controller skipped ({exc})")
 
     # 5. OpenCV imshow / waitKey render overhead benchmark
     print("5. Testing OpenCV render overhead (imshow + waitKey(1))...")
@@ -529,7 +529,7 @@ def run_probe_avatar(args: argparse.Namespace, config: AppConfig) -> int:
     try:
         controller = build_controller(config.control, dry_run=False)
     except Exception as exc:
-        print(f"Key controller unavailable ({exc}); probe requires live controls.")
+        print(f"Input controller unavailable ({exc}); probe requires live controls.")
         return 1
 
     actions = config.control.action_keys

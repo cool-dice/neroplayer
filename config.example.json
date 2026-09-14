@@ -38,6 +38,10 @@
     "max_combo_size": 2,
     "tap_duration": 0.02,
     "hold_keys": false,
+    "mouse_enabled": false,
+    "mouse_mode": "relative",
+    "mouse_sensitivity": 1.0,
+    "aim_step": 15,
     "pause_between_calls": 0.0,
     "fail_safe": false
   },

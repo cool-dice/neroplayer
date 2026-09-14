@@ -118,11 +118,13 @@ class AudioConfig:
 
 @dataclass
 class ControlConfig:
-    """Mapping from discrete agent actions to keyboard keys."""
+    """Mapping from discrete agent actions to keyboard and mouse actions."""
 
     # Index == action id. ``None`` is an explicit no-op, which the agent needs in
     # order to *not* act -- without it every step would perturb the game.
-    # Supports single keys ('d'), combos ('d+space' or ['d', 'space']), and None.
+    # Supports single keys ('d'), combos ('d+space' or ['d', 'space']),
+    # mouse actions ('mouse_left', 'mouse_right', 'aim_left', etc.),
+    # compound keyboard+mouse ('w+mouse_left', ['w', 'mouse_left']), and None.
     action_keys: list[Any] = field(default_factory=lambda: ["up", "down", None])
     # When auto_combos=True, generates all simultaneous combinations up to max_combo_size
     # from available single keys, so the agent can learn and discover which combos work.
@@ -136,6 +138,11 @@ class ControlConfig:
     # Hold the key for the whole step instead of tapping it. Useful for games
     # where movement is continuous while a key is down.
     hold_keys: bool = False
+    # Mouse controller settings
+    mouse_enabled: bool = False
+    mouse_mode: str = "relative"  # "relative" for 3D FPS aiming, "absolute" for RTS cursor clicking
+    mouse_sensitivity: float = 1.0
+    aim_step: int = 15  # discrete pixel step for relative camera turns in discrete action mode
     # pydirectinput inserts a global pause after every call; we manage our own
     # timing, so disable it.
     pause_between_calls: float = 0.0
