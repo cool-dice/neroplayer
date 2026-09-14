@@ -7,6 +7,7 @@ import pytest
 from ai_player.config import Region, RewardConfig
 from ai_player.mock_game import MockArcadeGame, build_mock_backends, mock_config
 from ai_player.observer import (
+    AutonomousGameOverDetector,
     ColorGameOverDetector,
     GameObserver,
     PixelChangeScoreSignal,
@@ -115,12 +116,22 @@ def test_template_detector_handles_a_solid_colour_banner(tmp_path, reward):
 
 
 def test_missing_template_falls_back_to_colour(reward):
+    reward.game_over_mode = "color"
     reward.game_over_template = "assets/does-not-exist.png"
 
-    with pytest.warns(RuntimeWarning):
-        detector = build_game_over_detector(reward)
+    detector = build_game_over_detector(reward)
 
     assert isinstance(detector, ColorGameOverDetector)
+
+
+def test_missing_template_in_auto_mode_falls_back_to_autonomous(reward):
+    reward.game_over_mode = "auto"
+    reward.game_over_template = "assets/does-not-exist.png"
+
+    with pytest.warns(RuntimeWarning, match="falling back to autonomous game-over detector"):
+        detector = build_game_over_detector(reward)
+
+    assert isinstance(detector, AutonomousGameOverDetector)
 
 
 def test_pixel_score_signal_fires_only_when_the_box_changes(reward):
@@ -279,4 +290,82 @@ def test_observer_detects_idle_and_applies_penalty(reward):
     assert v3.is_idle is False
     assert v3.frame_diff > 0.05
     assert v3.reward == pytest.approx(reward.step_reward + reward.movement_reward)
+
+
+def test_autonomous_game_over_detector_detects_game_over_texts(reward):
+    detector = AutonomousGameOverDetector(reward)
+
+    for color in [(255, 255, 255), (0, 0, 255), (0, 255, 255)]:
+        frame = np.random.randint(15, 50, (240, 320, 3), dtype=np.uint8)
+        cv2.putText(frame, "GAME OVER", (45, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+        detected, conf = detector.detect(frame)
+        assert detected is True, f"Failed for color {color}"
+        assert conf >= reward.game_over_threshold
+
+
+def test_autonomous_game_over_detector_detects_continue_screen(reward):
+    detector = AutonomousGameOverDetector(reward)
+    frame = np.random.randint(10, 40, (240, 320, 3), dtype=np.uint8)
+    cv2.putText(frame, "CONTINUE", (55, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+    detected, conf = detector.detect(frame)
+    assert detected is True
+    assert conf >= reward.game_over_threshold
+
+
+def test_autonomous_game_over_detector_ignores_normal_play_and_noise(reward):
+    # Set mock color away from random noise so color fallback doesn't trigger
+    reward.game_over_color_bgr = (255, 0, 128)
+    detector = AutonomousGameOverDetector(reward)
+
+    # Normal gameplay frames
+    for seed in range(5):
+        game = MockArcadeGame(seed=seed)
+        play_frame = game.render()
+        detected, conf = detector.detect(play_frame)
+        assert detected is False
+        assert conf < reward.game_over_threshold
+
+    # Pure random noise frames
+    rng = np.random.RandomState(42)
+    for _ in range(5):
+        noise_frame = rng.randint(0, 256, (240, 320, 3), dtype=np.uint8)
+        detected, conf = detector.detect(noise_frame)
+        assert detected is False
+        assert conf < reward.game_over_threshold
+
+
+def test_autonomous_game_over_detector_detects_dimming(reward):
+    # Set mock color away
+    reward.game_over_color_bgr = (255, 0, 128)
+    detector = AutonomousGameOverDetector(reward)
+
+    black_frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    # First frame initializes diff
+    detector.detect(black_frame)
+    # Second stationary black frame triggers blackout dimming
+    detected, conf = detector.detect(black_frame)
+    assert detected is True
+    assert conf >= reward.game_over_threshold
+
+
+def test_build_game_over_detector_modes(reward):
+    # Auto without template -> AutonomousGameOverDetector
+    reward.game_over_mode = "auto"
+    reward.game_over_template = None
+    assert isinstance(build_game_over_detector(reward), AutonomousGameOverDetector)
+
+    # Color mode -> ColorGameOverDetector
+    reward.game_over_mode = "color"
+    assert isinstance(build_game_over_detector(reward), ColorGameOverDetector)
+
+    # Text mode -> AutonomousGameOverDetector
+    reward.game_over_mode = "text"
+    assert isinstance(build_game_over_detector(reward), AutonomousGameOverDetector)
+
+    # Template mode without template raises ValueError
+    reward.game_over_mode = "template"
+    reward.game_over_template = None
+    with pytest.raises(ValueError, match="game_over_template is not specified"):
+        build_game_over_detector(reward)
+
 

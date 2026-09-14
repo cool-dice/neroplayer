@@ -46,6 +46,16 @@
     "score_reward": 10.0,
     "game_over_penalty": -100.0,
     "max_score_delta": 50,
+    "game_over_mode": "auto",
+    "game_over_keywords": [
+      "GAME OVER",
+      "CONTINUE",
+      "YOU DIED",
+      "DEFEAT",
+      "MISSION FAILED",
+      "TRY AGAIN"
+    ],
+    "game_over_threshold": 0.65,
     "game_over_region": {
       "left": 250,
       "top": 230,

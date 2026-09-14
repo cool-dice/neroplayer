@@ -106,6 +106,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         help="Seconds to wait before starting, so you can focus the game window",
     )
+    parser.add_argument(
+        "--game-over-mode",
+        choices=["auto", "template", "color", "text"],
+        default=None,
+        help="Game over detection mode (auto, template, color, text)",
+    )
     # Architecture & Autonomous Agent flags
     parser.add_argument(
         "--backbone",
@@ -184,6 +190,8 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.reward.movement_reward = args.movement_reward
     if args.idle_diff_threshold is not None:
         config.reward.idle_diff_threshold = args.idle_diff_threshold
+    if args.game_over_mode:
+        config.reward.game_over_mode = args.game_over_mode
     if args.auto_combos:
         config.control.auto_combos = True
     if args.max_combo_size is not None:

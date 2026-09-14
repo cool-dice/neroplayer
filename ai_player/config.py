@@ -161,6 +161,21 @@ class RewardConfig:
     max_score_delta: int = 50
 
     # --- Game-over detection -------------------------------------------------
+    # Mode for detecting game over: "auto", "template", "color", "text".
+    game_over_mode: str = "auto"
+    # Keywords searched by autonomous text detection and OCR.
+    game_over_keywords: list[str] = field(
+        default_factory=lambda: [
+            "GAME OVER",
+            "CONTINUE",
+            "YOU DIED",
+            "DEFEAT",
+            "MISSION FAILED",
+            "TRY AGAIN",
+        ]
+    )
+    # Detection confidence threshold [0.0, 1.0] for autonomous game-over detector.
+    game_over_threshold: float = 0.65
     # Region (relative to the capture region) inspected for the game-over cue.
     game_over_region: Region = field(default_factory=lambda: Region(left=200, top=200, width=400, height=200))
     # Path to a grayscale template crop. When present, cv2.matchTemplate is
