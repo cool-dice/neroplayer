@@ -134,3 +134,19 @@ def test_entity_tracker_causal_collisions():
     tracker._tracked_entities[2] = colliding_entity2
     events2 = tracker.check_collisions(player_box, points_gained=5.0, terminated=False)
     assert any(e["outcome"] == "collectible_pickup" for e in events2)
+
+
+def test_entity_tracker_scrolling_suppression():
+    cfg = TrackerConfig(scroll_threshold=20.0, max_active_entities=5)
+    tracker = EntityTracker(cfg)
+    player_box = BBox(50, 50, 20, 20)
+
+    # Frame 1: uniform
+    f1 = np.full((100, 100, 3), 10, dtype=np.uint8)
+    tracker.update(f1, player_box)
+
+    # Frame 2: global camera scroll (entire frame changes intensity by 50)
+    f2 = np.full((100, 100, 3), 60, dtype=np.uint8)
+    res = tracker.update(f2, player_box)
+    # Should detect global camera scroll and suppress explosion of false entity boxes
+    assert len(res) == 0

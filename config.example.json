@@ -111,7 +111,9 @@
     "history_len": 30,
     "min_entity_area": 16,
     "max_entity_area": 15000,
-    "collision_distance_threshold": 24.0
+    "collision_distance_threshold": 24.0,
+    "scroll_threshold": 25.0,
+    "max_active_entities": 15
   },
   "hud": {
     "auto_detect": true,

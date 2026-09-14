@@ -197,5 +197,21 @@ def test_env_exposes_player_bbox_and_entities():
         env.close()
 
 
+def test_env_renders_rgb_hud_inset():
+    config = mock_config()
+    config.vision.grayscale = False
+    config.vision.width = 128
+    config.vision.height = 128
+    env = make_env(config, mock=True, render_mode="rgb_array", seed=13)
+    try:
+        env.reset()
+        env.step(0)
+        hud = env.render_hud()
+        assert hud is not None
+        assert hud.shape == (config.capture.region.height, config.capture.region.width, 3)
+    finally:
+        env.close()
+
+
 
 

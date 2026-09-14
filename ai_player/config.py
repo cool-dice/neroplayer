@@ -271,6 +271,10 @@ class TrackerConfig:
     min_entity_area: int = 16
     max_entity_area: int = 15000
     collision_distance_threshold: float = 24.0
+    # Global motion compensation: threshold above which camera scrolling is detected
+    scroll_threshold: float = 25.0
+    # Max simultaneous detected entities before throttling as a scene change
+    max_active_entities: int = 15
 
 
 @dataclass

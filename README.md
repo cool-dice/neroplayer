@@ -250,6 +250,7 @@ The agent supports fully autonomous zero-shot adaptation across four core pillar
 
 4. **Threat, Projectile & Entity Tracker**:
    - Dynamic foreground object segmentation outside the player bounding box.
+   - **Camera Scroll & Parallax Protection**: Computes global camera motion delta. When camera scrolling or parallax background shifts occur, entity extraction is automatically throttled and capped (`scroll_threshold`, `max_active_entities`), preventing CPU spikes, FPS drops, and false-target explosions.
    - Classifies detected dynamic entities into:
      - `PROJECTILE`: Fast linear velocity (>7 px/step), compact bounding box.
      - `THREAT`: Movement oriented toward the player or platform patrolling.

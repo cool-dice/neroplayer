@@ -352,8 +352,19 @@ class EntityTracker:
         # Dynamic foreground detection via temporal frame differencing & thresholding
         detected_boxes: list[BBox] = []
         if self._prev_frame_gray is not None and self._prev_frame_gray.shape == gray.shape:
+            # Check for global camera scroll / screen transitions.
+            # If the screen scrolls or changes scene, a huge portion of the screen changes.
+            # When that happens, treating the whole frame as individual entities blows up CPU,
+            # drops FPS, and floods the screen with hundreds of false target boxes!
             temp_diff = cv2.absdiff(gray, self._prev_frame_gray)
-            _, diff_mask = cv2.threshold(temp_diff, 15, 255, cv2.THRESH_BINARY)
+            mean_diff = float(np.mean(temp_diff))
+            if mean_diff > self.config.scroll_threshold:
+                # Camera scrolled significantly: skip foreground entity extraction for this tick
+                # to allow the background to settle and maintain target FPS.
+                self._prev_frame_gray = gray
+                return self.entities
+
+            _, diff_mask = cv2.threshold(temp_diff, 20, 255, cv2.THRESH_BINARY)
             combined_mask = diff_mask
         else:
             combined_mask = np.zeros_like(gray)
@@ -383,11 +394,19 @@ class EntityTracker:
         contours, _ = cv2.findContours(clean_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         detected_boxes: list[BBox] = []
 
-        for cnt in contours:
-            x, y, bw, bh = cv2.boundingRect(cnt)
-            area = bw * bh
-            if self.config.min_entity_area <= area <= self.config.max_entity_area:
-                detected_boxes.append(BBox(x, y, bw, bh))
+        # If too many contours are detected, it's a parallax background shift or scene flash
+        if len(contours) <= self.config.max_active_entities * 2:
+            for cnt in contours:
+                x, y, bw, bh = cv2.boundingRect(cnt)
+                area = bw * bh
+                if self.config.min_entity_area <= area <= self.config.max_entity_area:
+                    detected_boxes.append(BBox(x, y, bw, bh))
+
+        # Cap max detections to prevent CPU overload and FPS collapse
+        if len(detected_boxes) > self.config.max_active_entities:
+            # Sort by area or proximity, keep top max_active_entities
+            detected_boxes.sort(key=lambda b: b.area, reverse=True)
+            detected_boxes = detected_boxes[: self.config.max_active_entities]
 
         # Associate detections with existing tracks
         self._associate_and_update(detected_boxes, player_bbox)

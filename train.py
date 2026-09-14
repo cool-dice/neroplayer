@@ -423,6 +423,13 @@ def main(argv: list[str] | None = None) -> int:
         keys_str = str(a["keys"] or "None")
         print(f"  Action {a['index']:2d}: {a['formatted']:<20} -> {keys_str:<15} [{status}]")
     print("=" * 60)
+    v_mode = "RGB" if config.vision.rgb else "GRAYSCALE"
+    print(
+        f"CONFIGURED VISION & TRACKER: {config.vision.width}x{config.vision.height} {v_mode} "
+        f"| Backbone: {config.vision.backbone} | Auto-Tracker: {config.tracker.enabled} "
+        f"| Auto-HUD: {config.hud.auto_detect}"
+    )
+    print("=" * 60)
 
     if args.countdown > 0:
         for remaining in range(args.countdown, 0, -1):

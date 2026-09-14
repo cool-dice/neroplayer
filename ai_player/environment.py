@@ -489,19 +489,33 @@ class GameEnv(gym.Env):
             cv2.LINE_AA,
         )
 
-        # Picture-in-Picture: Visualizing the Neural Network's actual 84x84 observation
+        # Picture-in-Picture: Visualizing the Neural Network's actual observation
         try:
-            obs = self._stack.observation  # shape: (frame_stack, 84, 84)
+            obs = self._stack.observation  # shape: (channels, H, W)
             if obs is not None and obs.ndim == 3 and obs.shape[0] > 0:
+                is_rgb = self.config.vision.rgb
+                vis_w = self.config.vision.width
+                vis_h = self.config.vision.height
                 inset_w = 168 if w >= 450 else (84 if w >= 220 else 0)
                 inset_h = inset_w
                 header_h = 18
                 if inset_w > 0 and h >= inset_h + header_h + bar_height + 20:
-                    latest_gray = obs[-1]
-                    scaled_cnn = cv2.resize(
-                        latest_gray, (inset_w, inset_h), interpolation=cv2.INTER_NEAREST
-                    )
-                    cnn_bgr = cv2.cvtColor(scaled_cnn, cv2.COLOR_GRAY2BGR)
+                    if is_rgb:
+                        # obs is (frame_stack * 3, H, W) in RGB plane order. Last frame is the last 3 planes.
+                        latest_ch = obs[-3:]  # (3, H, W)
+                        # Transpose from (C, H, W) RGB -> (H, W, C) BGR for OpenCV display
+                        latest_rgb = np.transpose(latest_ch, (1, 2, 0))
+                        latest_bgr = cv2.cvtColor(latest_rgb, cv2.COLOR_RGB2BGR)
+                        scaled_cnn = cv2.resize(
+                            latest_bgr, (inset_w, inset_h), interpolation=cv2.INTER_NEAREST
+                        )
+                        cnn_bgr = scaled_cnn
+                    else:
+                        latest_gray = obs[-1]
+                        scaled_cnn = cv2.resize(
+                            latest_gray, (inset_w, inset_h), interpolation=cv2.INTER_NEAREST
+                        )
+                        cnn_bgr = cv2.cvtColor(scaled_cnn, cv2.COLOR_GRAY2BGR)
 
                     x_start = w - inset_w - 10
                     y_start = h - inset_h - 10
@@ -521,21 +535,23 @@ class GameEnv(gym.Env):
                         (30, 30, 30),
                         -1,
                     )
+                    header_label = f"CNN INPUT ({vis_w}x{vis_h}{' RGB' if is_rgb else ' GRAY'})"
                     cv2.putText(
                         out,
-                        "CNN INPUT (84x84)",
-                        (x_start + 6, y_start - 4),
+                        header_label,
+                        (x_start + 4, y_start - 4),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.40,
+                        0.36,
                         (0, 255, 255),
                         1,
                         cv2.LINE_AA,
                     )
                     out[y_start : y_start + inset_h, x_start : x_start + inset_w] = cnn_bgr
 
-                    # If vertical room permits, show the 4-frame temporal filmstrip
+                    # If vertical room permits, show the temporal filmstrip
+                    n_stack = self.config.vision.frame_stack
                     film_h = 32
-                    film_w = inset_w // 4
+                    film_w = inset_w // max(1, n_stack)
                     if h >= inset_h + header_h + film_h + bar_height + 30 and film_w > 0:
                         y_film = y_start - header_h - film_h - 6
                         cv2.rectangle(
@@ -545,14 +561,18 @@ class GameEnv(gym.Env):
                             (100, 100, 100),
                             1,
                         )
-                        n_chips = min(4, obs.shape[0])
-                        for i in range(n_chips):
-                            chip = cv2.resize(
-                                obs[i], (film_w, film_h), interpolation=cv2.INTER_NEAREST
+                        for i in range(n_stack):
+                            if is_rgb:
+                                frame_slice = obs[i * 3 : (i + 1) * 3]
+                                frame_rgb = np.transpose(frame_slice, (1, 2, 0))
+                                chip_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                            else:
+                                chip_bgr = cv2.cvtColor(obs[i], cv2.COLOR_GRAY2BGR)
+                            chip_resized = cv2.resize(
+                                chip_bgr, (film_w, film_h), interpolation=cv2.INTER_NEAREST
                             )
-                            chip_bgr = cv2.cvtColor(chip, cv2.COLOR_GRAY2BGR)
                             cx = x_start + i * film_w
-                            out[y_film : y_film + film_h, cx : cx + film_w] = chip_bgr
+                            out[y_film : y_film + film_h, cx : cx + film_w] = chip_resized
                             cv2.rectangle(
                                 out,
                                 (cx, y_film),
@@ -562,7 +582,7 @@ class GameEnv(gym.Env):
                             )
                             cv2.putText(
                                 out,
-                                f"t{i - n_chips + 1}",
+                                f"t{i - n_stack + 1}",
                                 (cx + 2, y_film + film_h - 3),
                                 cv2.FONT_HERSHEY_SIMPLEX,
                                 0.30,
