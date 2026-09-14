@@ -27,6 +27,7 @@ def test_config_survives_a_json_round_trip(tmp_path):
     config.reward.idle_penalty = -0.2
     config.reward.movement_reward = 0.05
     config.reward.idle_diff_threshold = 0.1
+    config.reward.game_over_mode = "auto"
     config.train.algo = "dqn"
 
     restored = load_config(config.save(tmp_path / "config.json"))
@@ -35,11 +36,17 @@ def test_config_survives_a_json_round_trip(tmp_path):
     assert restored.reward.game_over_region == config.reward.game_over_region
     assert restored.reward.game_over_color_bgr == config.reward.game_over_color_bgr
     assert restored.reward.game_over_penalty == -50.0
+    assert restored.reward.game_over_mode == "auto"
+    assert "GAME OVER" in restored.reward.game_over_keywords
     assert restored.reward.idle_penalty == -0.2
     assert restored.reward.movement_reward == 0.05
     assert restored.reward.idle_diff_threshold == 0.1
     assert restored.control.auto_combos is False
     assert restored.control.max_combo_size == 2
+    assert restored.control.mouse_enabled is False
+    assert restored.control.mouse_mode == "relative"
+    assert restored.control.mouse_sensitivity == 1.0
+    assert restored.control.aim_step == 15
     assert restored.train.algo == "dqn"
     assert restored.vision.backbone == "nature_cnn"
     assert restored.tracker.enabled is False

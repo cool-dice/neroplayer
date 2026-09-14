@@ -213,5 +213,40 @@ def test_env_renders_rgb_hud_inset():
         env.close()
 
 
+def test_env_with_mouse_actions_in_telemetry_and_step():
+    config = mock_config()
+    config.control.mouse_enabled = True
+    config.control.action_keys = [
+        None,
+        "up",
+        "mouse_left",
+        "aim_right",
+        "up+mouse_left",
+    ]
+    env = make_env(config, mock=True, render_mode="rgb_array", seed=14)
+    try:
+        env.reset()
+        # Step with mouse click action
+        _obs, _rew, _term, _trunc, info_click = env.step(2)
+        assert "mouse" in info_click
+        assert info_click["mouse"]["clicks"] == ["left"]
+
+        # Step with mouse aim action
+        _obs, _rew, _term, _trunc, info_aim = env.step(3)
+        assert info_aim["mouse"]["aim"] == (config.control.aim_step, 0)
+
+        # Step with hybrid key + mouse
+        _obs, _rew, _term, _trunc, info_hybrid = env.step(4)
+        assert info_hybrid["mouse"]["clicks"] == ["left"]
+
+        # Render HUD should succeed without error and include telemetry
+        hud = env.render_hud()
+        assert hud is not None
+        assert hud.shape == (config.capture.region.height, config.capture.region.width, 3)
+    finally:
+        env.close()
+
+
+
 
 
