@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import cv2
 import numpy as np
 import pytest
@@ -12,6 +14,7 @@ from ai_player.observer import (
     GameObserver,
     PixelChangeScoreSignal,
     TemplateGameOverDetector,
+    VLMObserverInterface,
     build_game_over_detector,
     build_score_signal,
 )
@@ -367,5 +370,51 @@ def test_build_game_over_detector_modes(reward):
     reward.game_over_template = None
     with pytest.raises(ValueError, match="game_over_template is not specified"):
         build_game_over_detector(reward)
+
+
+def test_vlm_observer_supports_openai_chat_completions(monkeypatch):
+    from ai_player.config import HUDConfig
+
+    hud_cfg = HUDConfig(
+        use_vlm=True,
+        vlm_endpoint="http://localhost:1234/v1/chat/completions",
+        vlm_model="qwen/qwen3-vl-8b",
+    )
+    vlm = VLMObserverInterface(hud_cfg)
+
+    captured_payload = {}
+
+    class MockResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            content_str = (
+                '```json\n{"score": [10, 10, 100, 30], "lives": [200, 10, 60, 30], '
+                '"game_over": [50, 80, 200, 60]}\n```'
+            )
+            res = {"choices": [{"message": {"content": content_str}}]}
+            return json.dumps(res).encode("utf-8")
+
+    def mock_urlopen(req, timeout=None):
+        nonlocal captured_payload
+        captured_payload = json.loads(req.data.decode("utf-8"))
+        return MockResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", mock_urlopen)
+
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    res = vlm.detect_hud(frame)
+
+    assert "messages" in captured_payload
+    assert captured_payload["messages"][0]["role"] == "user"
+    assert res is not None
+    assert res.score_region == Region(left=10, top=10, width=100, height=30)
+    assert res.lives_region == Region(left=200, top=10, width=60, height=30)
+    assert res.game_over_region == Region(left=50, top=80, width=200, height=60)
+
 
 
