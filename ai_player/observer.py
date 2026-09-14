@@ -586,15 +586,37 @@ class VLMObserverInterface:
             'Return ONLY valid JSON: {"score": [x,y,w,h], "lives": [x,y,w,h], "game_over": [x,y,w,h]}'
         )
 
-        try:
-            # Try Ollama / OpenAI-compatible endpoint
-            payload = json.dumps({
+        # Format payload depending on endpoint (OpenAI chat completions vs Ollama generate)
+        is_openai = "chat/completions" in self.config.vlm_endpoint or "/v1/" in self.config.vlm_endpoint
+        if is_openai:
+            payload_dict = {
+                "model": self.config.vlm_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"},
+                            },
+                        ],
+                    }
+                ],
+                "stream": False,
+                "temperature": 0.1,
+            }
+        else:
+            payload_dict = {
                 "model": self.config.vlm_model,
                 "prompt": prompt,
                 "images": [b64_image],
                 "stream": False,
                 "format": "json",
-            }).encode("utf-8")
+            }
+
+        try:
+            payload = json.dumps(payload_dict).encode("utf-8")
 
             req = urllib.request.Request(
                 self.config.vlm_endpoint,
@@ -604,8 +626,33 @@ class VLMObserverInterface:
             with urllib.request.urlopen(req, timeout=self.config.vlm_timeout) as response:
                 res_data = json.loads(response.read().decode("utf-8"))
 
-            content = res_data.get("response") or res_data.get("content") or ""
-            parsed = json.loads(content) if isinstance(content, str) else content
+            content = ""
+            if "choices" in res_data and len(res_data["choices"]) > 0:
+                choice = res_data["choices"][0]
+                content = choice.get("message", {}).get("content", "")
+            elif "response" in res_data:
+                content = res_data["response"]
+            elif "content" in res_data:
+                content = res_data["content"]
+
+            # Handle possible markdown formatting (e.g. ```json ... ```)
+            if isinstance(content, str):
+                cleaned = content.strip()
+                if cleaned.startswith("```"):
+                    lines = cleaned.splitlines()
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].startswith("```"):
+                        lines = lines[:-1]
+                    cleaned = "\n".join(lines).strip()
+                # Find first '{' and last '}'
+                start_brace = cleaned.find("{")
+                end_brace = cleaned.rfind("}")
+                if start_brace != -1 and end_brace != -1 and end_brace > start_brace:
+                    cleaned = cleaned[start_brace : end_brace + 1]
+                parsed = json.loads(cleaned)
+            else:
+                parsed = content
 
             score_box = parsed.get("score")
             lives_box = parsed.get("lives")
