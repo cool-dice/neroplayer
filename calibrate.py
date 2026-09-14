@@ -77,6 +77,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Seconds to wait before grabbing the game-over template",
     )
     parser.add_argument("--skip-template", action="store_true")
+    parser.add_argument(
+        "--game-over-mode",
+        choices=["auto", "template", "color", "text"],
+        default=None,
+        help="Game over detection mode (auto, template, color, text)",
+    )
     parser.add_argument("--delay", type=float, default=2.0, help="Seconds to wait before --check")
     parser.add_argument(
         "--auto-combos",
@@ -165,7 +171,9 @@ def run_check(args: argparse.Namespace, config: AppConfig) -> int:
     print(f"Captured {frame.shape[1]}x{frame.shape[0]} -> {out_path}")
     print(f"Score box crop        -> {CAPTURES_DIR / 'score_box.png'}")
 
-    detected, confidence = build_game_over_detector(config.reward).detect(frame)
+    go_detector = build_game_over_detector(config.reward)
+    detected, confidence = go_detector.detect(frame)
+    print(f"Game over detector    : {type(go_detector).__name__} (mode: {config.reward.game_over_mode})")
     print(f"Game over detected    : {detected}  (confidence {confidence:.3f})")
 
     # Check frame difference against a second frame 0.5s later
@@ -487,6 +495,12 @@ def run_auto_hud(args: argparse.Namespace, config: AppConfig) -> int:
     if detected.game_over_region:
         config.reward.game_over_region = detected.game_over_region
 
+    go_detector = build_game_over_detector(config.reward)
+    go_detected, go_conf = go_detector.detect(frame)
+    print(f"  Game Over Detector : {type(go_detector).__name__} (mode: {config.reward.game_over_mode})")
+    print(f"  Game Over Check    : {go_detected} (confidence: {go_conf:.3f})")
+    print("=" * 60)
+
     out_img = annotate(frame, config)
     CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
     out_path = CAPTURES_DIR / "auto_hud_detected.png"
@@ -562,6 +576,8 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.config)
     if args.auto_combos:
         config.control.auto_combos = True
+    if args.game_over_mode:
+        config.reward.game_over_mode = args.game_over_mode
     try:
         if args.check:
             return run_check(args, config)
