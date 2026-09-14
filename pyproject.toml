@@ -1,9 +1,33 @@
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+[project]
+name = "ai-player"
+version = "0.1.0"
+description = "Vision + audio driven reinforcement learning agent that plays windowed games"
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+packages = ["ai_player"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
 
 [tool.ruff]
+line-length = 110
 target-version = "py310"
-line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    "B008",    # dataclass default_factory patterns read fine as-is
+    "SIM108",  # ternaries are not always clearer than if/else
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach into private attributes on purpose to stub collaborators.
+"tests/*" = ["SLF001"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::RuntimeWarning"]
