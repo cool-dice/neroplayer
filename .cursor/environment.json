@@ -1,0 +1,4 @@
+{
+  "name": "Windows Game RL Agent",
+  "install": "./.cursor/install.sh"
+}
