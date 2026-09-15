@@ -27,6 +27,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
+from .cognitive import CognitiveSupervisor
 from .config import AppConfig
 from .controls import (
     ActionController,
@@ -75,6 +76,7 @@ class GameEnv(gym.Env):
         audio_source: AudioSource | None = None,
         controller: ActionController | None = None,
         observer: GameObserver | None = None,
+        supervisor: CognitiveSupervisor | None = None,
         render_mode: str | None = None,
     ) -> None:
         super().__init__()
@@ -84,7 +86,23 @@ class GameEnv(gym.Env):
         self._frames = frame_source or ScreenCapture(self.config.capture)
         self._audio = audio_source or build_audio_source(self.config.audio)
         self._controller = controller or build_controller(self.config.control)
-        self._observer = observer or GameObserver(self.config.reward, hud_config=self.config.hud)
+
+        # Cognitive supervisor lifecycle
+        self._supervisor = supervisor
+        if self._supervisor is None:
+            self._supervisor = (
+                observer.supervisor
+                if observer is not None and observer.supervisor is not None
+                else CognitiveSupervisor(self.config.hud)
+            )
+        if self.config.hud.use_vlm and not self._supervisor.is_running:
+            self._supervisor.start()
+
+        self._observer = observer or GameObserver(
+            self.config.reward,
+            hud_config=self.config.hud,
+            supervisor=self._supervisor,
+        )
         # Idempotent: build_audio_source already started the recorder it built,
         # but an injected source may not be running yet.
         self._audio.start()
@@ -127,6 +145,11 @@ class GameEnv(gym.Env):
         self._episode_index = 0
         self._window_name = "ai-player"
         self._window_open = False
+
+    @property
+    def supervisor(self) -> CognitiveSupervisor:
+        """The cognitive supervisor / VLM sentinel instance."""
+        return self._supervisor
 
     @property
     def last_frame(self) -> np.ndarray | None:
@@ -210,10 +233,25 @@ class GameEnv(gym.Env):
         t2 = time.perf_counter()
         self._prof_grab.append((t2 - t1) * 1000.0)
 
+        # Feed frame to cognitive supervisor
+        if self._supervisor is not None:
+            self._supervisor.update_frame(frame)
+
         self._stack.push(self._processor.process(frame))
         verdict = self._observer.evaluate(frame)
         t3 = time.perf_counter()
         self._prof_proc.append((t3 - t2) * 1000.0)
+
+        # Auto Menu Navigation: if VLM supervisor identifies a MENU state,
+        # automatically tap restart/start keys to navigate past the menu.
+        cstate = self._supervisor.current_state if self._supervisor is not None else None
+        if (
+            cstate is not None
+            and self.config.hud.auto_menu_nav
+            and cstate.state == "menu"
+            and not verdict.terminated
+        ):
+            self._controller.restart()
 
         self._episode_steps += 1
         self._episode_reward += verdict.reward
@@ -283,6 +321,16 @@ class GameEnv(gym.Env):
                 elif tl in MOUSE_CLICK_ACTIONS:
                     mouse_active_info["clicks"].append(MOUSE_CLICK_ACTIONS[tl])
 
+        cog_info: dict[str, Any] = {}
+        if cstate is not None:
+            cog_info = {
+                "vlm_state": cstate.state,
+                "vlm_goal": cstate.suggested_action,
+                "vlm_desc": cstate.description,
+                "vlm_is_game_over": cstate.is_game_over,
+                "vlm_confidence": cstate.confidence,
+            }
+
         info: dict[str, Any] = {
             "score": verdict.score,
             "points": verdict.points,
@@ -297,6 +345,7 @@ class GameEnv(gym.Env):
             "player_bbox": player_bbox_dict,
             "entities": tracked_entities,
             "collisions": collision_events,
+            **cog_info,
         }
         # Benchmarking telemetry for HUD, diagnostics and logging
         self._last_info = {
@@ -388,7 +437,7 @@ class GameEnv(gym.Env):
                 cv2.arrowedLine(out, (cx, cy), (tip_x, tip_y), e_color, 1, tipLength=0.3)
 
         # Draw semi-transparent telemetry bar at the top
-        bar_height = min(112, max(44, h // 3))
+        bar_height = min(134, max(44, h // 3))
         overlay = out.copy()
         cv2.rectangle(overlay, (0, 0), (w, bar_height), (18, 18, 18), -1)
         cv2.addWeighted(overlay, 0.75, out, 0.25, 0, out)
@@ -526,6 +575,36 @@ class GameEnv(gym.Env):
             cv2.LINE_AA,
         )
 
+        # Line 6: Cognitive VLM Supervisor Status & Tactical Guidance
+        vlm_st = self._last_info.get("vlm_state", "NONE").upper()
+        vlm_desc = self._last_info.get("vlm_desc", "")
+        vlm_goal = self._last_info.get("vlm_goal")
+        goal_str = f" | GOAL: {vlm_goal.upper()}" if vlm_goal else ""
+        desc_str = f' "{vlm_desc}"' if vlm_desc else ""
+        cog_text = f"VLM: [{vlm_st}]{desc_str}{goal_str}"
+        if len(cog_text) > 85:
+            cog_text = cog_text[:82] + "..."
+
+        if vlm_st in ("GAME_OVER", "DEFEAT"):
+            cog_color = (0, 0, 255)  # Red
+        elif vlm_st == "MENU":
+            cog_color = (0, 255, 255)  # Yellow
+        elif vlm_st == "GAMEPLAY":
+            cog_color = (0, 255, 128)  # Light green
+        else:
+            cog_color = (200, 200, 200)
+
+        cv2.putText(
+            out,
+            cog_text,
+            (10, 120),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            cog_color,
+            1,
+            cv2.LINE_AA,
+        )
+
         # Picture-in-Picture: Visualizing the Neural Network's actual observation
         try:
             obs = self._stack.observation  # shape: (channels, H, W)
@@ -650,6 +729,8 @@ class GameEnv(gym.Env):
         return None
 
     def close(self) -> None:
+        if hasattr(self, "_supervisor") and self._supervisor is not None:
+            self._supervisor.stop()
         self._controller.release_all()
         self._audio.stop()
         self._frames.close()
@@ -724,6 +805,7 @@ def make_env(
     *,
     mock: bool = False,
     dry_run: bool = False,
+    supervisor: CognitiveSupervisor | None = None,
     render_mode: str | None = None,
     seed: int | None = None,
 ) -> GameEnv:
@@ -744,6 +826,7 @@ def make_env(
             frame_source=frames,
             audio_source=audio,
             controller=controller,
+            supervisor=supervisor,
             render_mode=render_mode,
         )
 
@@ -751,5 +834,6 @@ def make_env(
     return GameEnv(
         config,
         controller=build_controller(config.control, dry_run=dry_run),
+        supervisor=supervisor,
         render_mode=render_mode,
     )

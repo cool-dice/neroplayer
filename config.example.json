@@ -134,6 +134,9 @@
     "use_vlm": false,
     "vlm_endpoint": "http://localhost:11434/api/generate",
     "vlm_model": "qwen2.5-vl",
-    "vlm_timeout": 3.0
+    "vlm_timeout": 3.0,
+    "vlm_sentinel_interval": 2.0,
+    "auto_menu_nav": true,
+    "guidance_enabled": true
   }
 }

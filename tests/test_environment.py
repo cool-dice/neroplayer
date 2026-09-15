@@ -247,6 +247,60 @@ def test_env_with_mouse_actions_in_telemetry_and_step():
         env.close()
 
 
+def test_env_auto_menu_navigation_and_vlm_telemetry():
+    from ai_player.cognitive import CognitiveState, CognitiveSupervisor
+
+    class MockSupervisor(CognitiveSupervisor):
+        def __init__(self, cstate: CognitiveState):
+            super().__init__()
+            self._state = cstate
+
+        @property
+        def current_state(self) -> CognitiveState:
+            return self._state
+
+    config = mock_config()
+    config.hud.auto_menu_nav = True
+
+    mock_sup = MockSupervisor(
+        CognitiveState(
+            state="menu",
+            is_game_over=False,
+            confidence=0.95,
+            suggested_action="press_start",
+            description="Title menu screen",
+        )
+    )
+
+    controller = NullController(config.control)
+    _game, frames, audio, _mock_controller = build_mock_backends(config, seed=15)
+    env = GameEnv(
+        config,
+        frame_source=frames,
+        audio_source=audio,
+        controller=controller,
+        supervisor=mock_sup,
+        render_mode="rgb_array",
+    )
+    try:
+        env.reset()
+        restarts_before = controller.restarts
+        _obs, _rew, _term, _trunc, step_info = env.step(0)
+
+        # Because state == "menu" and auto_menu_nav is True, controller.restart() should be triggered
+        assert controller.restarts > restarts_before
+        assert step_info.get("vlm_state") == "menu"
+        assert step_info.get("vlm_goal") == "press_start"
+        assert step_info.get("vlm_desc") == "Title menu screen"
+
+        # Check HUD rendering displays VLM status
+        hud = env.render_hud()
+        assert hud is not None
+    finally:
+        env.close()
+
+
+
 
 
 

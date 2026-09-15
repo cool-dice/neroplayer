@@ -298,6 +298,15 @@ To support 3D FPS, RTS, and racing titles, `ControlConfig` supports both keyboar
 - **UnifiedInputController**: Seamlessly handles tap and hold modes across keys and mouse buttons, releasing all inputs on reset or termination.
 - **OpenAI & LM Studio VLM Support**: `VLMObserverInterface` supports `/v1/chat/completions` payload format with base64 `image_url` for seamless integration with local models (Qwen2.5-VL 8B) loaded in LM Studio.
 
+## Asynchronous VLM Sentinel & Cognitive Game Supervisor
+
+A dedicated non-blocking background daemon thread (`CognitiveSupervisor` / `AsyncVLMSentinel` in `ai_player/cognitive.py`) continuously monitors live gameplay with Vision-Language Models:
+- **Hierarchical Game State Recognition**: Identifies `"gameplay"`, `"game_over"`, `"menu"`, `"cutscene"`, `"loading"`.
+- **Autonomous Menu Navigation (`auto_menu_nav`)**: Automatically taps start/restart keys when a menu or title screen is identified, navigating the agent directly into playable gameplay.
+- **Continuous Game-Over Guidance**: Evaluates ongoing game state in the background and fuses VLM confidence into `AutonomousGameOverDetector` and `GameObserver`.
+- **Tactical Guidance & Commentary**: Supplies action suggestions (`suggested_action`, e.g. `"press_start"`, `"dodge_left"`) and scene descriptions (`vlm_desc`), rendered directly onto the real-time HUD telemetry overlay.
+- **Zero FPS Overhead**: Decoupled asynchronous polling never slows down or blocks the 30-60 FPS gameplay decision loop.
+
 ## Tuning that actually moves the needle
 
 - `env.target_fps` — the agent's decision rate. 10 Hz is a good start; frame

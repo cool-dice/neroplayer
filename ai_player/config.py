@@ -301,13 +301,17 @@ class TrackerConfig:
 
 @dataclass
 class HUDConfig:
-    """Settings for Autonomous HUD Detection (VLM + heuristic fallback)."""
+    """Settings for Autonomous HUD Detection & Cognitive VLM Supervisor."""
 
     auto_detect: bool = True
     use_vlm: bool = False
     vlm_endpoint: str = "http://localhost:11434/api/generate"  # Ollama / OpenAI-compatible
     vlm_model: str = "qwen2.5-vl"
     vlm_timeout: float = 3.0
+    # Asynchronous VLM Sentinel & Cognitive Game Supervisor
+    vlm_sentinel_interval: float = 2.0
+    auto_menu_nav: bool = True
+    guidance_enabled: bool = True
 
 
 @dataclass

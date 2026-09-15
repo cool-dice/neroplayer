@@ -33,13 +33,16 @@ import urllib.request
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import cv2
 import numpy as np
 
 from .config import HUDConfig, Region, RewardConfig
 from .perception import BGRFrame, crop_region
+
+if TYPE_CHECKING:
+    from .cognitive import CognitiveSupervisor
 
 _DIGITS = re.compile(r"\d+")
 
@@ -138,15 +141,23 @@ class AutonomousGameOverDetector:
 
     Combines:
     a) Template matching when a template is present on disk.
-    b) Fast OCR keyword detection looking for banners like "GAME OVER", "CONTINUE", etc.
+    b) Fast OCR keyword detection looking for banners like "GAME OVER", "CONTINUE", etc.,
+       including countdown patterns (e.g. "CONTINUE 9", "RETRY ?").
     c) Standalone CV edge correlation against synthetic banner masks and morphological
        horizontal glyph clustering (works with zero Tesseract binary dependencies).
     d) Fade / blackout / dimming detection on stationary center screen.
     e) Color fallback if game_over_color_bgr is explicitly matched.
+    f) CognitiveSupervisor (VLM sentinel) confidence fusion when linked.
     """
 
-    def __init__(self, reward: RewardConfig) -> None:
+    def __init__(
+        self,
+        reward: RewardConfig,
+        *,
+        supervisor: CognitiveSupervisor | None = None,
+    ) -> None:
         self._reward = reward
+        self._supervisor = supervisor
         self._keywords = [k.upper().strip() for k in reward.game_over_keywords if k.strip()]
         self._threshold = reward.game_over_threshold
         self._target_color = np.asarray(reward.game_over_color_bgr, dtype=np.int16)
@@ -207,12 +218,19 @@ class AutonomousGameOverDetector:
             candidates.append(chroma_img)
 
         config = "--psm 11"
+        continue_countdown_pattern = re.compile(
+            r"(CONTINUE|RETRY|COUNTDOWN)\s*[:?]?\s*([0-9])", re.IGNORECASE
+        )
         for img in candidates:
             try:
                 txt = self._pytesseract.image_to_string(img, config=config).upper()
                 for kw in self._keywords:
                     if kw in txt:
                         return 0.95, kw
+                # Check for countdown patterns near continue / retry
+                m = continue_countdown_pattern.search(txt)
+                if m:
+                    return 0.95, m.group(0)
             except Exception:
                 continue
 
@@ -255,9 +273,15 @@ class AutonomousGameOverDetector:
         best_score = 0.0
         best_match = ""
 
-        test_keywords = [kw for kw in self._keywords if kw in ("GAME OVER", "CONTINUE", "YOU DIED", "DEFEAT")]
+        test_keywords = [
+            kw for kw in self._keywords if kw in ("GAME OVER", "CONTINUE", "RETRY", "YOU DIED", "DEFEAT")
+        ]
         if not test_keywords and self._keywords:
             test_keywords = self._keywords[:3]
+        if "CONTINUE" not in test_keywords:
+            test_keywords.append("CONTINUE")
+        # Also include common countdown test strings
+        test_keywords.extend(["CONTINUE 9", "RETRY 9", "CONTINUE?"])
 
         for kw in test_keywords:
             (base_w, _), _ = cv2.getTextSize(kw, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
@@ -359,11 +383,23 @@ class AutonomousGameOverDetector:
         dim_conf = self._dimming_detect(roi)
         confidences.append(dim_conf)
 
+        # 6. Cognitive supervisor (VLM sentinel) state
+        if self._supervisor is not None:
+            cstate = self._supervisor.current_state
+            if cstate.is_game_over or cstate.state == "game_over":
+                # High confidence from cognitive VLM supervisor
+                vlm_conf = max(0.85, cstate.confidence)
+                confidences.append(vlm_conf)
+
         final_conf = max(confidences) if confidences else 0.0
         return final_conf >= self._threshold, final_conf
 
 
-def build_game_over_detector(reward: RewardConfig) -> GameOverDetector:
+def build_game_over_detector(
+    reward: RewardConfig,
+    *,
+    supervisor: CognitiveSupervisor | None = None,
+) -> GameOverDetector:
     """Build GameOverDetector according to reward.game_over_mode and configuration."""
     mode = getattr(reward, "game_over_mode", "auto").lower()
 
@@ -377,7 +413,7 @@ def build_game_over_detector(reward: RewardConfig) -> GameOverDetector:
         return ColorGameOverDetector(reward)
 
     if mode == "text":
-        return AutonomousGameOverDetector(reward)
+        return AutonomousGameOverDetector(reward, supervisor=supervisor)
 
     # mode == "auto" (default)
     if reward.game_over_template:
@@ -389,9 +425,9 @@ def build_game_over_detector(reward: RewardConfig) -> GameOverDetector:
             RuntimeWarning,
             stacklevel=2,
         )
-        return AutonomousGameOverDetector(reward)
+        return AutonomousGameOverDetector(reward, supervisor=supervisor)
 
-    return AutonomousGameOverDetector(reward)
+    return AutonomousGameOverDetector(reward, supervisor=supervisor)
 
 
 # ---------------------------------------------------------------------------
@@ -789,7 +825,7 @@ class FrameVerdict:
     game_over_confidence: float = 0.0
     frame_diff: float = 0.0
     is_idle: bool = False
-    info: dict[str, float] = field(default_factory=dict)
+    info: dict[str, Any] = field(default_factory=dict)
 
 
 class GameObserver:
@@ -804,20 +840,26 @@ class GameObserver:
         reward: RewardConfig,
         *,
         hud_config: HUDConfig | None = None,
+        supervisor: CognitiveSupervisor | None = None,
         game_over_detector: GameOverDetector | None = None,
         score_signal: ScoreSignal | None = None,
     ) -> None:
         self._reward = reward
         self._hud_config = hud_config
+        self._supervisor = supervisor
         self._hud_detector = (
             AutonomousHUDDetector(hud_config) if hud_config and hud_config.auto_detect else None
         )
         self._detected_hud: DetectedHUDRegions | None = None
-        self._game_over = game_over_detector or build_game_over_detector(reward)
+        self._game_over = game_over_detector or build_game_over_detector(reward, supervisor=supervisor)
         self._score = score_signal or build_score_signal(reward)
         self._streak = 0
         self._episode_points = 0.0
         self._last_frame_gray: np.ndarray | None = None
+
+    @property
+    def supervisor(self) -> CognitiveSupervisor | None:
+        return self._supervisor
 
     @property
     def episode_points(self) -> float:
@@ -837,7 +879,7 @@ class GameObserver:
             self._score = build_score_signal(self._reward)
         if self._detected_hud.game_over_region is not None and not self._reward.game_over_template:
             self._reward.game_over_region = self._detected_hud.game_over_region
-            self._game_over = build_game_over_detector(self._reward)
+            self._game_over = build_game_over_detector(self._reward, supervisor=self._supervisor)
         return self._detected_hud
 
     def reset(self) -> None:
@@ -874,6 +916,14 @@ class GameObserver:
         if terminated:
             # No score reward on the terminal frame: the game-over overlay
             # usually covers the HUD and would produce a spurious reading.
+            vlm_info: dict[str, Any] = {}
+            if self._supervisor is not None:
+                cstate = self._supervisor.current_state
+                vlm_info = {
+                    "vlm_state": cstate.state,
+                    "vlm_is_game_over": 1.0 if cstate.is_game_over else 0.0,
+                    "vlm_conf": cstate.confidence,
+                }
             return FrameVerdict(
                 reward=self._reward.game_over_penalty,
                 terminated=True,
@@ -884,6 +934,7 @@ class GameObserver:
                     "game_over": 1.0,
                     "frame_diff": frame_diff,
                     "is_idle": 1.0 if is_idle else 0.0,
+                    **vlm_info,
                 },
             )
 
@@ -899,6 +950,15 @@ class GameObserver:
         else:
             reward += self._reward.movement_reward
 
+        vlm_info: dict[str, Any] = {}
+        if self._supervisor is not None:
+            cstate = self._supervisor.current_state
+            vlm_info = {
+                "vlm_state": cstate.state,
+                "vlm_is_game_over": 1.0 if cstate.is_game_over else 0.0,
+                "vlm_conf": cstate.confidence,
+            }
+
         return FrameVerdict(
             reward=float(reward),
             terminated=False,
@@ -912,5 +972,6 @@ class GameObserver:
                 "points": points,
                 "frame_diff": frame_diff,
                 "is_idle": 1.0 if is_idle else 0.0,
+                **vlm_info,
             },
         )

@@ -417,4 +417,68 @@ def test_vlm_observer_supports_openai_chat_completions(monkeypatch):
     assert res.game_over_region == Region(left=50, top=80, width=200, height=60)
 
 
+def test_autonomous_game_over_detector_incorporates_supervisor(reward):
+    from ai_player.cognitive import CognitiveState, CognitiveSupervisor
+
+    class MockSupervisor(CognitiveSupervisor):
+        def __init__(self, cstate: CognitiveState):
+            super().__init__()
+            self._state = cstate
+
+        @property
+        def current_state(self) -> CognitiveState:
+            return self._state
+
+    # Initially gameplay
+    mock_sup = MockSupervisor(CognitiveState(state="gameplay", is_game_over=False, confidence=0.0))
+    detector = AutonomousGameOverDetector(reward, supervisor=mock_sup)
+
+    # Clean empty frame without text or game over
+    frame = np.ones((240, 320, 3), dtype=np.uint8) * 128
+    detected, conf = detector.detect(frame)
+    assert detected is False
+
+    # Now supervisor signals game_over with high confidence
+    mock_sup._state = CognitiveState(
+        state="game_over",
+        is_game_over=True,
+        confidence=0.95,
+        suggested_action="press_space",
+        description="Game over continue 9",
+    )
+    detected, conf = detector.detect(frame)
+    assert detected is True
+    assert conf >= 0.85
+
+
+def test_game_observer_passes_supervisor_telemetry(reward):
+    from ai_player.cognitive import CognitiveState, CognitiveSupervisor
+
+    class MockSupervisor(CognitiveSupervisor):
+        def __init__(self, cstate: CognitiveState):
+            super().__init__()
+            self._state = cstate
+
+        @property
+        def current_state(self) -> CognitiveState:
+            return self._state
+
+    mock_sup = MockSupervisor(
+        CognitiveState(
+            state="game_over",
+            is_game_over=True,
+            confidence=0.99,
+            suggested_action="press_start",
+            description="Player defeated",
+        )
+    )
+    observer = GameObserver(reward, supervisor=mock_sup)
+    frame = np.ones((240, 320, 3), dtype=np.uint8) * 128
+    verdict = observer.evaluate(frame)
+    # First detection counts streak
+    assert verdict.game_over_confidence >= 0.85
+    assert verdict.info.get("vlm_state") == "game_over"
+    assert verdict.info.get("vlm_is_game_over") == 1.0
+
+
 

@@ -51,6 +51,9 @@ def test_config_survives_a_json_round_trip(tmp_path):
     assert restored.vision.backbone == "nature_cnn"
     assert restored.tracker.enabled is False
     assert restored.hud.auto_detect is False
+    assert restored.hud.vlm_sentinel_interval == 2.0
+    assert restored.hud.auto_menu_nav is True
+    assert restored.hud.guidance_enabled is True
 
 
 def test_vision_config_rgb_and_shapes():
