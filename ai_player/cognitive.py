@@ -15,6 +15,7 @@ Provides:
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import threading
@@ -42,6 +43,8 @@ class CognitiveState:
     confidence: float = 0.0
     suggested_action: str | None = None
     description: str = ""
+    hud_layout: dict[str, list[int]] = field(default_factory=dict)
+    vital_stats: dict[str, float] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
     raw_response: dict[str, Any] = field(default_factory=dict)
 
@@ -113,6 +116,7 @@ class CognitiveSupervisor:
 
         # Thread-safe telemetry state
         self._current_state = CognitiveState()
+        self._dynamic_hud_layout: dict[str, list[int]] = {}
         self._query_count = 0
         self._last_query_time = 0.0
 
@@ -131,9 +135,22 @@ class CognitiveSupervisor:
                 confidence=self._current_state.confidence,
                 suggested_action=self._current_state.suggested_action,
                 description=self._current_state.description,
+                hud_layout=dict(self._current_state.hud_layout),
+                vital_stats=dict(self._current_state.vital_stats),
                 timestamp=self._current_state.timestamp,
                 raw_response=dict(self._current_state.raw_response),
             )
+
+    @property
+    def dynamic_hud_layout(self) -> dict[str, list[int]]:
+        """Return the latest dynamic HUD layout bounding boxes."""
+        with self._lock:
+            return dict(self._dynamic_hud_layout)
+
+    def update_dynamic_hud(self, regions: dict[str, list[int]]) -> None:
+        """Store dynamic HUD layout regions."""
+        with self._lock:
+            self._dynamic_hud_layout.update(regions)
 
     @property
     def is_game_over(self) -> bool:
@@ -208,6 +225,8 @@ class CognitiveSupervisor:
                 state = self._query_vlm(frame_to_process)
                 with self._lock:
                     self._current_state = state
+                    if state.hud_layout:
+                        self._dynamic_hud_layout.update(state.hud_layout)
                     self._last_query_time = time.time()
                     self._query_count += 1
             except Exception as exc:
@@ -238,9 +257,15 @@ class CognitiveSupervisor:
             '2. "game_over": boolean (true if player died or game over screen is shown, false otherwise)\n'
             '3. "confidence": float between 0.0 and 1.0\n'
             '4. "suggested_action": string or null (e.g. "press_start", "fire", "restart")\n'
-            '5. "description": short string (max 15 words) describing what is happening\n\n'
+            '5. "description": short string (max 15 words) describing what is happening\n'
+            '6. "hud_layout": optional dict of bounding boxes [x, y, w, h] for HUD elements '
+            'e.g. {"score": [x,y,w,h], "hp": [x,y,w,h], "ammo": [x,y,w,h], "game_over": [x,y,w,h]}\n'
+            '7. "vital_stats": optional dict of gameplay statistics e.g. '
+            '{"hp_ratio": 0.0-1.0, "ammo_ratio": 0.0-1.0, "lives": int/float, "danger_level": 0.0-1.0}\n\n'
             'Respond ONLY with valid JSON. Example: {"state": "gameplay", "game_over": false, '
-            '"confidence": 0.95, "suggested_action": "fire", "description": "Space battle"}'
+            '"confidence": 0.95, "suggested_action": "fire", "description": "Space battle", '
+            '"hud_layout": {"score": [10, 10, 100, 30], "hp": [10, 50, 120, 20]}, '
+            '"vital_stats": {"hp_ratio": 0.85, "ammo_ratio": 0.5, "lives": 3.0, "danger_level": 0.2}}'
         )
 
         is_openai = "chat/completions" in self.config.vlm_endpoint or "/v1/" in self.config.vlm_endpoint
@@ -317,12 +342,31 @@ class CognitiveSupervisor:
 
         desc = str(parsed.get("description", "")).strip()
 
+        # Parse hud_layout
+        hud_layout: dict[str, list[int]] = {}
+        raw_hud = parsed.get("hud_layout")
+        if isinstance(raw_hud, dict):
+            for k, box in raw_hud.items():
+                if isinstance(box, (list, tuple)) and len(box) >= 4:
+                    with contextlib.suppress(ValueError, TypeError):
+                        hud_layout[str(k).lower()] = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+
+        # Parse vital_stats
+        vital_stats: dict[str, float] = {}
+        raw_vitals = parsed.get("vital_stats")
+        if isinstance(raw_vitals, dict):
+            for k, val in raw_vitals.items():
+                with contextlib.suppress(ValueError, TypeError):
+                    vital_stats[str(k).lower()] = float(val)
+
         return CognitiveState(
             state=state_str,
             is_game_over=is_go,
             confidence=conf,
             suggested_action=action,
             description=desc,
+            hud_layout=hud_layout,
+            vital_stats=vital_stats,
             timestamp=time.time(),
             raw_response=parsed,
         )

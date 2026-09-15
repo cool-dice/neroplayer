@@ -164,6 +164,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Disable controllability probe and dynamic entity tracking",
     )
+    parser.add_argument(
+        "--cognitive-obs",
+        action="store_true",
+        default=None,
+        help="Enable semantic cognitive observation vector in RL observation space",
+    )
+    parser.add_argument(
+        "--no-cognitive-obs",
+        action="store_true",
+        help="Disable semantic cognitive observation vector",
+    )
     return parser.parse_args(argv)
 
 
@@ -215,6 +226,10 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.tracker.enabled = True
     if args.no_auto_tracker:
         config.tracker.enabled = False
+    if args.cognitive_obs:
+        config.hud.cognitive_obs = True
+    if args.no_cognitive_obs:
+        config.hud.cognitive_obs = False
     return config
 
 

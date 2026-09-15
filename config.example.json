@@ -137,6 +137,8 @@
     "vlm_timeout": 3.0,
     "vlm_sentinel_interval": 2.0,
     "auto_menu_nav": true,
-    "guidance_enabled": true
+    "guidance_enabled": true,
+    "cognitive_obs": false,
+    "cognitive_dim": 8
   }
 }

@@ -54,6 +54,8 @@ def test_config_survives_a_json_round_trip(tmp_path):
     assert restored.hud.vlm_sentinel_interval == 2.0
     assert restored.hud.auto_menu_nav is True
     assert restored.hud.guidance_enabled is True
+    assert restored.hud.cognitive_obs is False
+    assert restored.hud.cognitive_dim == 8
 
 
 def test_vision_config_rgb_and_shapes():
@@ -79,3 +81,16 @@ def test_unknown_keys_are_ignored(tmp_path):
 
 def test_load_config_without_a_path_returns_defaults():
     assert load_config(None) == AppConfig()
+
+
+def test_hud_config_cognitive_obs():
+    cfg = AppConfig()
+    assert cfg.hud.cognitive_obs is False
+    assert cfg.hud.cognitive_dim == 8
+    cfg.hud.cognitive_obs = True
+    d = cfg.to_dict()
+    assert d["hud"]["cognitive_obs"] is True
+    assert d["hud"]["cognitive_dim"] == 8
+    restored = AppConfig.from_dict(d)
+    assert restored.hud.cognitive_obs is True
+    assert restored.hud.cognitive_dim == 8

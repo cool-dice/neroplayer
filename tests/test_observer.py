@@ -475,10 +475,56 @@ def test_game_observer_passes_supervisor_telemetry(reward):
     observer = GameObserver(reward, supervisor=mock_sup)
     frame = np.ones((240, 320, 3), dtype=np.uint8) * 128
     verdict = observer.evaluate(frame)
-    # First detection counts streak
+    # Instant termination should fire immediately even if streak < detection_patience
+    assert verdict.terminated is True
     assert verdict.game_over_confidence >= 0.85
     assert verdict.info.get("vlm_state") == "game_over"
     assert verdict.info.get("vlm_is_game_over") == 1.0
+
+
+def test_autonomous_game_over_detector_vlm_instant_trigger(reward):
+    from ai_player.cognitive import CognitiveState, CognitiveSupervisor
+
+    class MockSupervisor(CognitiveSupervisor):
+        def __init__(self, cstate: CognitiveState):
+            super().__init__()
+            self._state = cstate
+
+        @property
+        def current_state(self) -> CognitiveState:
+            return self._state
+
+    mock_sup = MockSupervisor(
+        CognitiveState(
+            state="defeat",
+            is_game_over=True,
+            confidence=0.88,
+        )
+    )
+    detector = AutonomousGameOverDetector(reward, supervisor=mock_sup)
+    frame = np.ones((240, 320, 3), dtype=np.uint8) * 100
+    detected, conf = detector.detect(frame)
+    assert detected is True
+    assert conf == 1.0
+
+
+def test_game_observer_dynamic_hud_update(reward):
+    observer = GameObserver(reward)
+    assert observer._reward.score_region.left == reward.score_region.left
+
+    # Update dynamic HUD
+    observer.update_dynamic_hud({
+        "score": [50, 40, 150, 35],
+        "game_over": [100, 120, 300, 100],
+    })
+
+    assert observer._reward.score_region.left == 50
+    assert observer._reward.score_region.top == 40
+    assert observer._reward.score_region.width == 150
+    assert observer._reward.score_region.height == 35
+
+    assert observer._reward.game_over_region.left == 100
+    assert observer._reward.game_over_region.top == 120
 
 
 

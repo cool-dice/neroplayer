@@ -386,7 +386,9 @@ class AutonomousGameOverDetector:
         # 6. Cognitive supervisor (VLM sentinel) state
         if self._supervisor is not None:
             cstate = self._supervisor.current_state
-            if cstate.is_game_over or cstate.state == "game_over":
+            if (cstate.is_game_over or cstate.state in ("game_over", "defeat")) and cstate.confidence >= 0.7:
+                return True, 1.0
+            if cstate.is_game_over or cstate.state in ("game_over", "defeat"):
                 # High confidence from cognitive VLM supervisor
                 vlm_conf = max(0.85, cstate.confidence)
                 confidences.append(vlm_conf)
@@ -869,6 +871,43 @@ class GameObserver:
     def detected_hud(self) -> DetectedHUDRegions | None:
         return self._detected_hud
 
+    def update_dynamic_hud(self, regions: dict[str, list[int]]) -> None:
+        """Dynamically update score/game-over regions and detectors from dynamic HUD boxes."""
+        if not regions:
+            return
+
+        # Update supervisor if attached
+        if self._supervisor is not None:
+            self._supervisor.update_dynamic_hud(regions)
+
+        # Update score region if valid
+        score_box = regions.get("score")
+        if score_box and len(score_box) == 4 and score_box[2] > 0 and score_box[3] > 0:
+            self._reward.score_region = Region(
+                left=int(score_box[0]),
+                top=int(score_box[1]),
+                width=int(score_box[2]),
+                height=int(score_box[3]),
+            )
+            self._score = build_score_signal(self._reward)
+
+        # Update game_over region if valid and template not explicitly configured
+        go_box = regions.get("game_over")
+        if (
+            go_box
+            and len(go_box) == 4
+            and go_box[2] > 0
+            and go_box[3] > 0
+            and not self._reward.game_over_template
+        ):
+            self._reward.game_over_region = Region(
+                left=int(go_box[0]),
+                top=int(go_box[1]),
+                width=int(go_box[2]),
+                height=int(go_box[3]),
+            )
+            self._game_over = build_game_over_detector(self._reward, supervisor=self._supervisor)
+
     def auto_configure_hud(self, frame: BGRFrame) -> DetectedHUDRegions | None:
         """Autonomously detect and populate HUD regions if not explicitly pinned."""
         if self._hud_detector is None:
@@ -909,6 +948,13 @@ class GameObserver:
         detected, confidence = self._game_over.detect(frame)
         self._streak = self._streak + 1 if detected else 0
         terminated = self._streak >= max(1, self._reward.detection_patience)
+
+        # Instant VLM game-over: if sentinel confirms game over, bypass detection patience
+        if not terminated and self._supervisor is not None:
+            cstate = self._supervisor.current_state
+            if (cstate.is_game_over or cstate.state in ("game_over", "defeat")) and cstate.confidence >= 0.75:
+                terminated = True
+                confidence = max(confidence, cstate.confidence)
 
         frame_diff = self._compute_frame_diff(frame)
         is_idle = frame_diff < self._reward.idle_diff_threshold

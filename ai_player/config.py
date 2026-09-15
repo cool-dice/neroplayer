@@ -312,6 +312,9 @@ class HUDConfig:
     vlm_sentinel_interval: float = 2.0
     auto_menu_nav: bool = True
     guidance_enabled: bool = True
+    # Semantic Cognitive Observation Space for RL
+    cognitive_obs: bool = False
+    cognitive_dim: int = 8
 
 
 @dataclass

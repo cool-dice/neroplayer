@@ -254,6 +254,19 @@ class MultiModalExtractor(BaseFeaturesExtractor):
         else:
             self.audio_net = None
 
+        self.cognitive_space = observation_space.spaces.get("cognitive")
+        if self.cognitive_space is not None:
+            cog_dim = int(torch.tensor(self.cognitive_space.shape).prod().item())
+            self.cognitive_net = nn.Sequential(
+                nn.Linear(cog_dim, 32),
+                nn.ReLU(),
+                nn.Linear(32, 32),
+                nn.ReLU(),
+            )
+            fused_dim += 32
+        else:
+            self.cognitive_net = None
+
         self.fusion = nn.Sequential(nn.Linear(fused_dim, features_dim), nn.ReLU())
 
     @property
@@ -278,4 +291,7 @@ class MultiModalExtractor(BaseFeaturesExtractor):
         if self.audio_net is not None:
             audio = observations["audio"].float()
             features = torch.cat([features, self.audio_net(audio)], dim=1)
+        if self.cognitive_net is not None:
+            cognitive = observations["cognitive"].float()
+            features = torch.cat([features, self.cognitive_net(cognitive)], dim=1)
         return self.fusion(features)
