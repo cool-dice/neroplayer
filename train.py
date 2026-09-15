@@ -40,7 +40,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--config", type=Path, default=None, help="JSON config from calibrate.py")
     parser.add_argument("--algo", choices=sorted(ALGOS), default=None, help="RL algorithm")
-    parser.add_argument("--timesteps", type=int, default=None, help="Total environment steps to train for")
+    parser.add_argument(
+        "--timesteps",
+        type=int,
+        default=None,
+        help="Total environment steps to train for (0 or negative for infinite)",
+    )
+    parser.add_argument(
+        "--infinite",
+        action="store_true",
+        help="Train indefinitely until manually stopped with Ctrl+C",
+    )
     parser.add_argument("--run-name", default=None, help="Name for the models/ and logs/ subfolders")
     parser.add_argument("--resume", type=Path, default=None, help="Path to a .zip model to continue training")
     parser.add_argument("--seed", type=int, default=None)
@@ -183,7 +193,10 @@ def build_config(args: argparse.Namespace) -> AppConfig:
     config = load_config(args.config)
     if args.algo:
         config.train.algo = args.algo
-    if args.timesteps is not None:
+    if args.infinite or (args.timesteps is not None and args.timesteps <= 0):
+        # 100 billion steps is effectively infinite (>50 years at 60 FPS)
+        config.train.total_timesteps = 100_000_000_000
+    elif args.timesteps is not None:
         config.train.total_timesteps = args.timesteps
     if args.seed is not None:
         config.train.seed = args.seed

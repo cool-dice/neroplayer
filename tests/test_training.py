@@ -196,6 +196,17 @@ def test_build_config_cognitive_obs_flags():
     assert cfg_no.hud.cognitive_obs is False
 
 
+def test_build_config_infinite_flag():
+    args = train_script.parse_args(["--infinite"])
+    cfg = train_script.build_config(args)
+    assert cfg.train.total_timesteps >= 1_000_000_000
+
+    args_zero = train_script.parse_args(["--timesteps", "0"])
+    cfg_zero = train_script.build_config(args_zero)
+    assert cfg_zero.train.total_timesteps >= 1_000_000_000
+
+
+
 
 def test_console_stats_callback(capsys):
     env = make_env(mock=True, seed=20)
