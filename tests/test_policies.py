@@ -97,3 +97,30 @@ def test_multimodal_extractor_resnet_grayscale():
     assert out.shape == (2, 512)
     assert torch.isfinite(out).all()
     assert extractor.audio_net is None
+
+
+def test_multimodal_extractor_with_cognitive_observation():
+    obs_space = gym.spaces.Dict({
+        "frames": gym.spaces.Box(0, 255, shape=(4, 84, 84), dtype=np.uint8),
+        "audio": gym.spaces.Box(0.0, 1.0, shape=(32, 30), dtype=np.float32),
+        "cognitive": gym.spaces.Box(0.0, 1.0, shape=(8,), dtype=np.float32),
+    })
+
+    extractor = MultiModalExtractor(
+        obs_space,
+        features_dim=256,
+        cnn_output_dim=128,
+        audio_output_dim=64,
+        backbone="nature_cnn",
+    )
+
+    batch = {
+        "frames": torch.randint(0, 255, (2, 4, 84, 84), dtype=torch.uint8),
+        "audio": torch.rand(2, 32, 30, dtype=torch.float32),
+        "cognitive": torch.rand(2, 8, dtype=torch.float32),
+    }
+
+    out = extractor(batch)
+    assert out.shape == (2, 256)
+    assert torch.isfinite(out).all()
+    assert extractor.cognitive_net is not None

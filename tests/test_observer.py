@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import cv2
 import numpy as np
 import pytest
@@ -7,10 +9,12 @@ import pytest
 from ai_player.config import Region, RewardConfig
 from ai_player.mock_game import MockArcadeGame, build_mock_backends, mock_config
 from ai_player.observer import (
+    AutonomousGameOverDetector,
     ColorGameOverDetector,
     GameObserver,
     PixelChangeScoreSignal,
     TemplateGameOverDetector,
+    VLMObserverInterface,
     build_game_over_detector,
     build_score_signal,
 )
@@ -115,12 +119,22 @@ def test_template_detector_handles_a_solid_colour_banner(tmp_path, reward):
 
 
 def test_missing_template_falls_back_to_colour(reward):
+    reward.game_over_mode = "color"
     reward.game_over_template = "assets/does-not-exist.png"
 
-    with pytest.warns(RuntimeWarning):
-        detector = build_game_over_detector(reward)
+    detector = build_game_over_detector(reward)
 
     assert isinstance(detector, ColorGameOverDetector)
+
+
+def test_missing_template_in_auto_mode_falls_back_to_autonomous(reward):
+    reward.game_over_mode = "auto"
+    reward.game_over_template = "assets/does-not-exist.png"
+
+    with pytest.warns(RuntimeWarning, match="falling back to autonomous game-over detector"):
+        detector = build_game_over_detector(reward)
+
+    assert isinstance(detector, AutonomousGameOverDetector)
 
 
 def test_pixel_score_signal_fires_only_when_the_box_changes(reward):
@@ -279,4 +293,238 @@ def test_observer_detects_idle_and_applies_penalty(reward):
     assert v3.is_idle is False
     assert v3.frame_diff > 0.05
     assert v3.reward == pytest.approx(reward.step_reward + reward.movement_reward)
+
+
+def test_autonomous_game_over_detector_detects_game_over_texts(reward):
+    detector = AutonomousGameOverDetector(reward)
+
+    for color in [(255, 255, 255), (0, 0, 255), (0, 255, 255)]:
+        frame = np.random.randint(15, 50, (240, 320, 3), dtype=np.uint8)
+        cv2.putText(frame, "GAME OVER", (45, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+        detected, conf = detector.detect(frame)
+        assert detected is True, f"Failed for color {color}"
+        assert conf >= reward.game_over_threshold
+
+
+def test_autonomous_game_over_detector_detects_continue_screen(reward):
+    detector = AutonomousGameOverDetector(reward)
+    frame = np.random.randint(10, 40, (240, 320, 3), dtype=np.uint8)
+    cv2.putText(frame, "CONTINUE", (55, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+    detected, conf = detector.detect(frame)
+    assert detected is True
+    assert conf >= reward.game_over_threshold
+
+
+def test_autonomous_game_over_detector_ignores_normal_play_and_noise(reward):
+    # Set mock color away from random noise so color fallback doesn't trigger
+    reward.game_over_color_bgr = (255, 0, 128)
+    detector = AutonomousGameOverDetector(reward)
+
+    # Normal gameplay frames
+    for seed in range(5):
+        game = MockArcadeGame(seed=seed)
+        play_frame = game.render()
+        detected, conf = detector.detect(play_frame)
+        assert detected is False
+        assert conf < reward.game_over_threshold
+
+    # Pure random noise frames
+    rng = np.random.RandomState(42)
+    for _ in range(5):
+        noise_frame = rng.randint(0, 256, (240, 320, 3), dtype=np.uint8)
+        detected, conf = detector.detect(noise_frame)
+        assert detected is False
+        assert conf < reward.game_over_threshold
+
+
+def test_autonomous_game_over_detector_detects_dimming(reward):
+    # Set mock color away
+    reward.game_over_color_bgr = (255, 0, 128)
+    detector = AutonomousGameOverDetector(reward)
+
+    black_frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    # First frame initializes diff
+    detector.detect(black_frame)
+    # Second stationary black frame triggers blackout dimming
+    detected, conf = detector.detect(black_frame)
+    assert detected is True
+    assert conf >= reward.game_over_threshold
+
+
+def test_build_game_over_detector_modes(reward):
+    # Auto without template -> AutonomousGameOverDetector
+    reward.game_over_mode = "auto"
+    reward.game_over_template = None
+    assert isinstance(build_game_over_detector(reward), AutonomousGameOverDetector)
+
+    # Color mode -> ColorGameOverDetector
+    reward.game_over_mode = "color"
+    assert isinstance(build_game_over_detector(reward), ColorGameOverDetector)
+
+    # Text mode -> AutonomousGameOverDetector
+    reward.game_over_mode = "text"
+    assert isinstance(build_game_over_detector(reward), AutonomousGameOverDetector)
+
+    # Template mode without template raises ValueError
+    reward.game_over_mode = "template"
+    reward.game_over_template = None
+    with pytest.raises(ValueError, match="game_over_template is not specified"):
+        build_game_over_detector(reward)
+
+
+def test_vlm_observer_supports_openai_chat_completions(monkeypatch):
+    from ai_player.config import HUDConfig
+
+    hud_cfg = HUDConfig(
+        use_vlm=True,
+        vlm_endpoint="http://localhost:1234/v1/chat/completions",
+        vlm_model="qwen/qwen3-vl-8b",
+    )
+    vlm = VLMObserverInterface(hud_cfg)
+
+    captured_payload = {}
+
+    class MockResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            content_str = (
+                '```json\n{"score": [10, 10, 100, 30], "lives": [200, 10, 60, 30], '
+                '"game_over": [50, 80, 200, 60]}\n```'
+            )
+            res = {"choices": [{"message": {"content": content_str}}]}
+            return json.dumps(res).encode("utf-8")
+
+    def mock_urlopen(req, timeout=None):
+        nonlocal captured_payload
+        captured_payload = json.loads(req.data.decode("utf-8"))
+        return MockResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", mock_urlopen)
+
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    res = vlm.detect_hud(frame)
+
+    assert "messages" in captured_payload
+    assert captured_payload["messages"][0]["role"] == "user"
+    assert res is not None
+    assert res.score_region == Region(left=10, top=10, width=100, height=30)
+    assert res.lives_region == Region(left=200, top=10, width=60, height=30)
+    assert res.game_over_region == Region(left=50, top=80, width=200, height=60)
+
+
+def test_autonomous_game_over_detector_incorporates_supervisor(reward):
+    from ai_player.cognitive import CognitiveState, CognitiveSupervisor
+
+    class MockSupervisor(CognitiveSupervisor):
+        def __init__(self, cstate: CognitiveState):
+            super().__init__()
+            self._state = cstate
+
+        @property
+        def current_state(self) -> CognitiveState:
+            return self._state
+
+    # Initially gameplay
+    mock_sup = MockSupervisor(CognitiveState(state="gameplay", is_game_over=False, confidence=0.0))
+    detector = AutonomousGameOverDetector(reward, supervisor=mock_sup)
+
+    # Clean empty frame without text or game over
+    frame = np.ones((240, 320, 3), dtype=np.uint8) * 128
+    detected, conf = detector.detect(frame)
+    assert detected is False
+
+    # Now supervisor signals game_over with high confidence
+    mock_sup._state = CognitiveState(
+        state="game_over",
+        is_game_over=True,
+        confidence=0.95,
+        suggested_action="press_space",
+        description="Game over continue 9",
+    )
+    detected, conf = detector.detect(frame)
+    assert detected is True
+    assert conf >= 0.85
+
+
+def test_game_observer_passes_supervisor_telemetry(reward):
+    from ai_player.cognitive import CognitiveState, CognitiveSupervisor
+
+    class MockSupervisor(CognitiveSupervisor):
+        def __init__(self, cstate: CognitiveState):
+            super().__init__()
+            self._state = cstate
+
+        @property
+        def current_state(self) -> CognitiveState:
+            return self._state
+
+    mock_sup = MockSupervisor(
+        CognitiveState(
+            state="game_over",
+            is_game_over=True,
+            confidence=0.99,
+            suggested_action="press_start",
+            description="Player defeated",
+        )
+    )
+    observer = GameObserver(reward, supervisor=mock_sup)
+    frame = np.ones((240, 320, 3), dtype=np.uint8) * 128
+    verdict = observer.evaluate(frame)
+    # Instant termination should fire immediately even if streak < detection_patience
+    assert verdict.terminated is True
+    assert verdict.game_over_confidence >= 0.85
+    assert verdict.info.get("vlm_state") == "game_over"
+    assert verdict.info.get("vlm_is_game_over") == 1.0
+
+
+def test_autonomous_game_over_detector_vlm_instant_trigger(reward):
+    from ai_player.cognitive import CognitiveState, CognitiveSupervisor
+
+    class MockSupervisor(CognitiveSupervisor):
+        def __init__(self, cstate: CognitiveState):
+            super().__init__()
+            self._state = cstate
+
+        @property
+        def current_state(self) -> CognitiveState:
+            return self._state
+
+    mock_sup = MockSupervisor(
+        CognitiveState(
+            state="defeat",
+            is_game_over=True,
+            confidence=0.88,
+        )
+    )
+    detector = AutonomousGameOverDetector(reward, supervisor=mock_sup)
+    frame = np.ones((240, 320, 3), dtype=np.uint8) * 100
+    detected, conf = detector.detect(frame)
+    assert detected is True
+    assert conf == 1.0
+
+
+def test_game_observer_dynamic_hud_update(reward):
+    observer = GameObserver(reward)
+    assert observer._reward.score_region.left == reward.score_region.left
+
+    # Update dynamic HUD
+    observer.update_dynamic_hud({
+        "score": [50, 40, 150, 35],
+        "game_over": [100, 120, 300, 100],
+    })
+
+    assert observer._reward.score_region.left == 50
+    assert observer._reward.score_region.top == 40
+    assert observer._reward.score_region.width == 150
+    assert observer._reward.score_region.height == 35
+
+    assert observer._reward.game_over_region.left == 100
+    assert observer._reward.game_over_region.top == 120
+
+
 

@@ -33,13 +33,16 @@ import urllib.request
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import cv2
 import numpy as np
 
 from .config import HUDConfig, Region, RewardConfig
 from .perception import BGRFrame, crop_region
+
+if TYPE_CHECKING:
+    from .cognitive import CognitiveSupervisor
 
 _DIGITS = re.compile(r"\d+")
 
@@ -133,18 +136,300 @@ class ColorGameOverDetector:
         return coverage >= self._reward.color_coverage, coverage
 
 
-def build_game_over_detector(reward: RewardConfig) -> GameOverDetector:
-    """Prefer template matching; fall back to the colour heuristic."""
+class AutonomousGameOverDetector:
+    """Multi-strategy zero-shot autonomous game over detection.
+
+    Combines:
+    a) Template matching when a template is present on disk.
+    b) Fast OCR keyword detection looking for banners like "GAME OVER", "CONTINUE", etc.,
+       including countdown patterns (e.g. "CONTINUE 9", "RETRY ?").
+    c) Standalone CV edge correlation against synthetic banner masks and morphological
+       horizontal glyph clustering (works with zero Tesseract binary dependencies).
+    d) Fade / blackout / dimming detection on stationary center screen.
+    e) Color fallback if game_over_color_bgr is explicitly matched.
+    f) CognitiveSupervisor (VLM sentinel) confidence fusion when linked.
+    """
+
+    def __init__(
+        self,
+        reward: RewardConfig,
+        *,
+        supervisor: CognitiveSupervisor | None = None,
+    ) -> None:
+        self._reward = reward
+        self._supervisor = supervisor
+        self._keywords = [k.upper().strip() for k in reward.game_over_keywords if k.strip()]
+        self._threshold = reward.game_over_threshold
+        self._target_color = np.asarray(reward.game_over_color_bgr, dtype=np.int16)
+
+        # Template detector if file exists
+        self._template_detector: TemplateGameOverDetector | None = None
+        if reward.game_over_template:
+            tpl_path = Path(reward.game_over_template)
+            if tpl_path.exists():
+                try:
+                    self._template_detector = TemplateGameOverDetector(tpl_path, reward)
+                except Exception:
+                    self._template_detector = None
+
+        # Check pytesseract availability
+        self._has_tesseract = False
+        try:
+            import pytesseract
+
+            pytesseract.get_tesseract_version()
+            self._pytesseract = pytesseract
+            self._has_tesseract = True
+        except Exception:
+            self._has_tesseract = False
+
+        # Previous frame for fade/blackout stationarity
+        self._last_center_gray: np.ndarray | None = None
+
+    def reset(self) -> None:
+        """Reset stateful frame history."""
+        self._last_center_gray = None
+
+    def _extract_center_roi(self, frame: BGRFrame) -> np.ndarray:
+        h, w = frame.shape[:2]
+        # Inspect central 70% of screen
+        y1, y2 = int(h * 0.15), int(h * 0.85)
+        x1, x2 = int(w * 0.15), int(w * 0.85)
+        return frame[y1:y2, x1:x2]
+
+    def _ocr_detect(self, roi: np.ndarray) -> tuple[float, str]:
+        if not self._has_tesseract or not self._keywords:
+            return 0.0, ""
+
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+        inv = cv2.bitwise_not(thresh)
+
+        # High-contrast color difference (e.g. red/yellow banner text on dark background)
+        chroma_img = None
+        if roi.ndim == 3:
+            b, g, r = roi[:, :, 0].astype(float), roi[:, :, 1].astype(float), roi[:, :, 2].astype(float)
+            chroma = np.maximum(np.abs(r - g), np.abs(r - b))
+            otsu = cv2.THRESH_BINARY | cv2.THRESH_OTSU
+            _, chroma_img = cv2.threshold(chroma.astype(np.uint8), 0, 255, otsu)
+
+        candidates = [thresh, inv]
+        if chroma_img is not None:
+            candidates.append(chroma_img)
+
+        config = "--psm 11"
+        continue_countdown_pattern = re.compile(
+            r"(CONTINUE|RETRY|COUNTDOWN)\s*[:?]?\s*([0-9])", re.IGNORECASE
+        )
+        for img in candidates:
+            try:
+                txt = self._pytesseract.image_to_string(img, config=config).upper()
+                for kw in self._keywords:
+                    if kw in txt:
+                        return 0.95, kw
+                # Check for countdown patterns near continue / retry
+                m = continue_countdown_pattern.search(txt)
+                if m:
+                    return 0.95, m.group(0)
+            except Exception:
+                continue
+
+        return 0.0, ""
+
+    def _edge_and_contour_detect(self, roi: np.ndarray) -> tuple[float, str]:
+        rh, rw = roi.shape[:2]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
+
+        # 1. Morphological horizontal glyph clustering (look for prominent text banner box)
+        grad_x = cv2.Sobel(gray, cv2.CV_16S, 1, 0, ksize=3)
+        abs_grad = cv2.convertScaleAbs(grad_x)
+        _, thresh = cv2.threshold(abs_grad, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
+        connected = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, k)
+        cnts, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        candidate_boxes: list[tuple[int, int, int, int]] = []
+        contour_conf = 0.0
+        for c in cnts:
+            bx, by, bw, bh = cv2.boundingRect(c)
+            ar = bw / float(bh) if bh > 0 else 0.0
+            if 2.0 <= ar <= 15.0 and 10 <= bh <= rh * 0.6 and bw >= rw * 0.25:
+                patch = thresh[by : by + bh, bx : bx + bw]
+                density = float(np.count_nonzero(patch)) / float(bw * bh)
+                cy = by + bh / 2.0
+                center_dist = abs(cy - rh / 2.0) / (rh / 2.0)
+                if 0.12 <= density <= 0.60 and center_dist <= 0.6:
+                    candidate_boxes.append((bx, by, bw, bh))
+                    pos_score = max(0.0, 1.0 - 0.3 * center_dist)
+                    width_score = min(1.0, bw / (rw * 0.40))
+                    c_score = pos_score * width_score * 0.85
+                    if c_score > contour_conf:
+                        contour_conf = c_score
+
+        # 2. Multi-scale Canny edge correlation against synthetic text masks
+        canny_screen = cv2.Canny(gray, 50, 150)
+        blur_screen = cv2.GaussianBlur(canny_screen.astype(np.float32), (5, 5), 0)
+
+        best_score = 0.0
+        best_match = ""
+
+        test_keywords = [
+            kw for kw in self._keywords if kw in ("GAME OVER", "CONTINUE", "RETRY", "YOU DIED", "DEFEAT")
+        ]
+        if not test_keywords and self._keywords:
+            test_keywords = self._keywords[:3]
+        if "CONTINUE" not in test_keywords:
+            test_keywords.append("CONTINUE")
+        # Also include common countdown test strings
+        test_keywords.extend(["CONTINUE 9", "RETRY 9", "CONTINUE?"])
+
+        for kw in test_keywords:
+            (base_w, _), _ = cv2.getTextSize(kw, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
+            if base_w <= 0:
+                continue
+            for fraction in (0.35, 0.50, 0.65, 0.80):
+                target_w = int(rw * fraction)
+                scale = target_w / float(base_w)
+                if scale < 0.25 or scale > 2.5:
+                    continue
+                (tw, th), bl = cv2.getTextSize(kw, cv2.FONT_HERSHEY_SIMPLEX, scale, 2)
+                if th + bl + 4 >= rh or tw + 4 >= rw:
+                    continue
+                banner = np.zeros((th + bl + 6, tw + 6), dtype=np.uint8)
+                cv2.putText(banner, kw, (3, th + 3), cv2.FONT_HERSHEY_SIMPLEX, scale, 255, 2)
+                cb = cv2.Canny(banner, 50, 150)
+                blur_banner = cv2.GaussianBlur(cb.astype(np.float32), (5, 5), 0)
+                res = cv2.matchTemplate(blur_screen, blur_banner, cv2.TM_CCOEFF_NORMED)
+                score = float(res.max())
+                if score > best_score:
+                    best_score = score
+                    best_match = kw
+
+        # Only count high edge correlation when there is a corresponding candidate text box
+        # or when correlation is exceptionally high (> 0.70)
+        edge_conf = 0.0
+        if candidate_boxes:
+            if best_score >= 0.45:
+                edge_conf = min(1.0, 0.75 + (best_score - 0.45) * 1.5)
+            elif best_score >= 0.35:
+                edge_conf = 0.50 + (best_score - 0.35) * 2.5
+        elif best_score >= 0.70:
+            edge_conf = min(1.0, 0.75 + (best_score - 0.70) * 1.5)
+
+        combined = max(edge_conf, contour_conf)
+        if edge_conf >= 0.5 and contour_conf >= 0.5:
+            combined = min(1.0, max(edge_conf, contour_conf) + 0.15)
+
+        return combined, best_match
+
+    def _dimming_detect(self, roi: np.ndarray) -> float:
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
+        mean_intensity = float(gray.mean())
+
+        diff = 1.0
+        if self._last_center_gray is not None and self._last_center_gray.shape == gray.shape:
+            diff = float(cv2.absdiff(gray, self._last_center_gray).mean()) / 255.0
+        self._last_center_gray = gray
+
+        # Death blackout: screen brightness < 15 and stationary (diff < 0.02)
+        if mean_intensity < 15.0 and diff < 0.02:
+            return 0.85
+        if mean_intensity < 8.0:
+            return 0.70
+        return 0.0
+
+    def _color_detect(self, frame: BGRFrame) -> float:
+        patch = crop_region(frame, self._reward.game_over_region)
+        if patch.size == 0:
+            return 0.0
+        distance = np.abs(patch.astype(np.int16) - self._target_color)
+        matching = distance.max(axis=2) <= self._reward.color_tolerance
+        coverage = float(matching.mean())
+        if coverage >= self._reward.color_coverage:
+            return min(1.0, coverage)
+        return 0.0
+
+    def detect(self, frame: BGRFrame) -> tuple[bool, float]:
+        confidences: list[float] = []
+
+        # 1. Template matching if configured
+        if self._template_detector is not None:
+            t_detected, t_conf = self._template_detector.detect(frame)
+            if t_detected:
+                return True, t_conf
+            confidences.append(t_conf)
+
+        roi = self._extract_center_roi(frame)
+        if roi.size == 0:
+            return False, 0.0
+
+        # 2. OCR detection
+        ocr_conf, _ = self._ocr_detect(roi)
+        if ocr_conf >= 0.9:
+            return True, ocr_conf
+        confidences.append(ocr_conf)
+
+        # 3. CV edge correlation & morphological contour clustering
+        cv_conf, _ = self._edge_and_contour_detect(roi)
+        confidences.append(cv_conf)
+
+        # 4. Color fallback
+        col_conf = self._color_detect(frame)
+        if col_conf >= self._reward.color_coverage:
+            return True, col_conf
+        confidences.append(col_conf)
+
+        # 5. Screen dimming / fade detection
+        dim_conf = self._dimming_detect(roi)
+        confidences.append(dim_conf)
+
+        # 6. Cognitive supervisor (VLM sentinel) state
+        if self._supervisor is not None:
+            cstate = self._supervisor.current_state
+            if (cstate.is_game_over or cstate.state in ("game_over", "defeat")) and cstate.confidence >= 0.7:
+                return True, 1.0
+            if cstate.is_game_over or cstate.state in ("game_over", "defeat"):
+                # High confidence from cognitive VLM supervisor
+                vlm_conf = max(0.85, cstate.confidence)
+                confidences.append(vlm_conf)
+
+        final_conf = max(confidences) if confidences else 0.0
+        return final_conf >= self._threshold, final_conf
+
+
+def build_game_over_detector(
+    reward: RewardConfig,
+    *,
+    supervisor: CognitiveSupervisor | None = None,
+) -> GameOverDetector:
+    """Build GameOverDetector according to reward.game_over_mode and configuration."""
+    mode = getattr(reward, "game_over_mode", "auto").lower()
+
+    if mode == "template":
+        if not reward.game_over_template:
+            raise ValueError("game_over_mode is 'template' but game_over_template is not specified.")
+        path = Path(reward.game_over_template)
+        return TemplateGameOverDetector(path, reward)
+
+    if mode == "color":
+        return ColorGameOverDetector(reward)
+
+    if mode == "text":
+        return AutonomousGameOverDetector(reward, supervisor=supervisor)
+
+    # mode == "auto" (default)
     if reward.game_over_template:
         path = Path(reward.game_over_template)
         if path.exists():
             return TemplateGameOverDetector(path, reward)
         warnings.warn(
-            f"Game-over template {path} not found; using the mean-colour detector.",
+            f"Game-over template {path} not found; falling back to autonomous game-over detector.",
             RuntimeWarning,
             stacklevel=2,
         )
-    return ColorGameOverDetector(reward)
+        return AutonomousGameOverDetector(reward, supervisor=supervisor)
+
+    return AutonomousGameOverDetector(reward, supervisor=supervisor)
 
 
 # ---------------------------------------------------------------------------
@@ -339,15 +624,37 @@ class VLMObserverInterface:
             'Return ONLY valid JSON: {"score": [x,y,w,h], "lives": [x,y,w,h], "game_over": [x,y,w,h]}'
         )
 
-        try:
-            # Try Ollama / OpenAI-compatible endpoint
-            payload = json.dumps({
+        # Format payload depending on endpoint (OpenAI chat completions vs Ollama generate)
+        is_openai = "chat/completions" in self.config.vlm_endpoint or "/v1/" in self.config.vlm_endpoint
+        if is_openai:
+            payload_dict = {
+                "model": self.config.vlm_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"},
+                            },
+                        ],
+                    }
+                ],
+                "stream": False,
+                "temperature": 0.1,
+            }
+        else:
+            payload_dict = {
                 "model": self.config.vlm_model,
                 "prompt": prompt,
                 "images": [b64_image],
                 "stream": False,
                 "format": "json",
-            }).encode("utf-8")
+            }
+
+        try:
+            payload = json.dumps(payload_dict).encode("utf-8")
 
             req = urllib.request.Request(
                 self.config.vlm_endpoint,
@@ -357,8 +664,33 @@ class VLMObserverInterface:
             with urllib.request.urlopen(req, timeout=self.config.vlm_timeout) as response:
                 res_data = json.loads(response.read().decode("utf-8"))
 
-            content = res_data.get("response") or res_data.get("content") or ""
-            parsed = json.loads(content) if isinstance(content, str) else content
+            content = ""
+            if "choices" in res_data and len(res_data["choices"]) > 0:
+                choice = res_data["choices"][0]
+                content = choice.get("message", {}).get("content", "")
+            elif "response" in res_data:
+                content = res_data["response"]
+            elif "content" in res_data:
+                content = res_data["content"]
+
+            # Handle possible markdown formatting (e.g. ```json ... ```)
+            if isinstance(content, str):
+                cleaned = content.strip()
+                if cleaned.startswith("```"):
+                    lines = cleaned.splitlines()
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].startswith("```"):
+                        lines = lines[:-1]
+                    cleaned = "\n".join(lines).strip()
+                # Find first '{' and last '}'
+                start_brace = cleaned.find("{")
+                end_brace = cleaned.rfind("}")
+                if start_brace != -1 and end_brace != -1 and end_brace > start_brace:
+                    cleaned = cleaned[start_brace : end_brace + 1]
+                parsed = json.loads(cleaned)
+            else:
+                parsed = content
 
             score_box = parsed.get("score")
             lives_box = parsed.get("lives")
@@ -495,7 +827,7 @@ class FrameVerdict:
     game_over_confidence: float = 0.0
     frame_diff: float = 0.0
     is_idle: bool = False
-    info: dict[str, float] = field(default_factory=dict)
+    info: dict[str, Any] = field(default_factory=dict)
 
 
 class GameObserver:
@@ -510,20 +842,26 @@ class GameObserver:
         reward: RewardConfig,
         *,
         hud_config: HUDConfig | None = None,
+        supervisor: CognitiveSupervisor | None = None,
         game_over_detector: GameOverDetector | None = None,
         score_signal: ScoreSignal | None = None,
     ) -> None:
         self._reward = reward
         self._hud_config = hud_config
+        self._supervisor = supervisor
         self._hud_detector = (
             AutonomousHUDDetector(hud_config) if hud_config and hud_config.auto_detect else None
         )
         self._detected_hud: DetectedHUDRegions | None = None
-        self._game_over = game_over_detector or build_game_over_detector(reward)
+        self._game_over = game_over_detector or build_game_over_detector(reward, supervisor=supervisor)
         self._score = score_signal or build_score_signal(reward)
         self._streak = 0
         self._episode_points = 0.0
         self._last_frame_gray: np.ndarray | None = None
+
+    @property
+    def supervisor(self) -> CognitiveSupervisor | None:
+        return self._supervisor
 
     @property
     def episode_points(self) -> float:
@@ -532,6 +870,43 @@ class GameObserver:
     @property
     def detected_hud(self) -> DetectedHUDRegions | None:
         return self._detected_hud
+
+    def update_dynamic_hud(self, regions: dict[str, list[int]]) -> None:
+        """Dynamically update score/game-over regions and detectors from dynamic HUD boxes."""
+        if not regions:
+            return
+
+        # Update supervisor if attached
+        if self._supervisor is not None:
+            self._supervisor.update_dynamic_hud(regions)
+
+        # Update score region if valid
+        score_box = regions.get("score")
+        if score_box and len(score_box) == 4 and score_box[2] > 0 and score_box[3] > 0:
+            self._reward.score_region = Region(
+                left=int(score_box[0]),
+                top=int(score_box[1]),
+                width=int(score_box[2]),
+                height=int(score_box[3]),
+            )
+            self._score = build_score_signal(self._reward)
+
+        # Update game_over region if valid and template not explicitly configured
+        go_box = regions.get("game_over")
+        if (
+            go_box
+            and len(go_box) == 4
+            and go_box[2] > 0
+            and go_box[3] > 0
+            and not self._reward.game_over_template
+        ):
+            self._reward.game_over_region = Region(
+                left=int(go_box[0]),
+                top=int(go_box[1]),
+                width=int(go_box[2]),
+                height=int(go_box[3]),
+            )
+            self._game_over = build_game_over_detector(self._reward, supervisor=self._supervisor)
 
     def auto_configure_hud(self, frame: BGRFrame) -> DetectedHUDRegions | None:
         """Autonomously detect and populate HUD regions if not explicitly pinned."""
@@ -543,7 +918,7 @@ class GameObserver:
             self._score = build_score_signal(self._reward)
         if self._detected_hud.game_over_region is not None and not self._reward.game_over_template:
             self._reward.game_over_region = self._detected_hud.game_over_region
-            self._game_over = build_game_over_detector(self._reward)
+            self._game_over = build_game_over_detector(self._reward, supervisor=self._supervisor)
         return self._detected_hud
 
     def reset(self) -> None:
@@ -551,6 +926,8 @@ class GameObserver:
         self._episode_points = 0.0
         self._last_frame_gray = None
         self._score.reset()
+        if hasattr(self._game_over, "reset"):
+            self._game_over.reset()
 
     def is_game_over(self, frame: BGRFrame) -> bool:
         """Single-frame, non-debounced check. Used while waiting for a restart."""
@@ -572,12 +949,27 @@ class GameObserver:
         self._streak = self._streak + 1 if detected else 0
         terminated = self._streak >= max(1, self._reward.detection_patience)
 
+        # Instant VLM game-over: if sentinel confirms game over, bypass detection patience
+        if not terminated and self._supervisor is not None:
+            cstate = self._supervisor.current_state
+            if (cstate.is_game_over or cstate.state in ("game_over", "defeat")) and cstate.confidence >= 0.75:
+                terminated = True
+                confidence = max(confidence, cstate.confidence)
+
         frame_diff = self._compute_frame_diff(frame)
         is_idle = frame_diff < self._reward.idle_diff_threshold
 
         if terminated:
             # No score reward on the terminal frame: the game-over overlay
             # usually covers the HUD and would produce a spurious reading.
+            vlm_info: dict[str, Any] = {}
+            if self._supervisor is not None:
+                cstate = self._supervisor.current_state
+                vlm_info = {
+                    "vlm_state": cstate.state,
+                    "vlm_is_game_over": 1.0 if cstate.is_game_over else 0.0,
+                    "vlm_conf": cstate.confidence,
+                }
             return FrameVerdict(
                 reward=self._reward.game_over_penalty,
                 terminated=True,
@@ -588,6 +980,7 @@ class GameObserver:
                     "game_over": 1.0,
                     "frame_diff": frame_diff,
                     "is_idle": 1.0 if is_idle else 0.0,
+                    **vlm_info,
                 },
             )
 
@@ -603,6 +996,15 @@ class GameObserver:
         else:
             reward += self._reward.movement_reward
 
+        vlm_info: dict[str, Any] = {}
+        if self._supervisor is not None:
+            cstate = self._supervisor.current_state
+            vlm_info = {
+                "vlm_state": cstate.state,
+                "vlm_is_game_over": 1.0 if cstate.is_game_over else 0.0,
+                "vlm_conf": cstate.confidence,
+            }
+
         return FrameVerdict(
             reward=float(reward),
             terminated=False,
@@ -616,5 +1018,6 @@ class GameObserver:
                 "points": points,
                 "frame_diff": frame_diff,
                 "is_idle": 1.0 if is_idle else 0.0,
+                **vlm_info,
             },
         )

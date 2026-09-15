@@ -213,5 +213,212 @@ def test_env_renders_rgb_hud_inset():
         env.close()
 
 
+def test_env_with_mouse_actions_in_telemetry_and_step():
+    config = mock_config()
+    config.control.mouse_enabled = True
+    config.control.action_keys = [
+        None,
+        "up",
+        "mouse_left",
+        "aim_right",
+        "up+mouse_left",
+    ]
+    env = make_env(config, mock=True, render_mode="rgb_array", seed=14)
+    try:
+        env.reset()
+        # Step with mouse click action
+        _obs, _rew, _term, _trunc, info_click = env.step(2)
+        assert "mouse" in info_click
+        assert info_click["mouse"]["clicks"] == ["left"]
+
+        # Step with mouse aim action
+        _obs, _rew, _term, _trunc, info_aim = env.step(3)
+        assert info_aim["mouse"]["aim"] == (config.control.aim_step, 0)
+
+        # Step with hybrid key + mouse
+        _obs, _rew, _term, _trunc, info_hybrid = env.step(4)
+        assert info_hybrid["mouse"]["clicks"] == ["left"]
+
+        # Render HUD should succeed without error and include telemetry
+        hud = env.render_hud()
+        assert hud is not None
+        assert hud.shape == (config.capture.region.height, config.capture.region.width, 3)
+    finally:
+        env.close()
+
+
+def test_env_auto_menu_navigation_and_vlm_telemetry():
+    from ai_player.cognitive import CognitiveState, CognitiveSupervisor
+
+    class MockSupervisor(CognitiveSupervisor):
+        def __init__(self, cstate: CognitiveState):
+            super().__init__()
+            self._state = cstate
+
+        @property
+        def current_state(self) -> CognitiveState:
+            return self._state
+
+    config = mock_config()
+    config.hud.auto_menu_nav = True
+
+    mock_sup = MockSupervisor(
+        CognitiveState(
+            state="menu",
+            is_game_over=False,
+            confidence=0.95,
+            suggested_action="press_start",
+            description="Title menu screen",
+        )
+    )
+
+    controller = NullController(config.control)
+    _game, frames, audio, _mock_controller = build_mock_backends(config, seed=15)
+    env = GameEnv(
+        config,
+        frame_source=frames,
+        audio_source=audio,
+        controller=controller,
+        supervisor=mock_sup,
+        render_mode="rgb_array",
+    )
+    try:
+        env.reset()
+        restarts_before = controller.restarts
+        _obs, _rew, _term, _trunc, step_info = env.step(0)
+
+        # Because state == "menu" and auto_menu_nav is True, controller.restart() should be triggered
+        assert controller.restarts > restarts_before
+        assert step_info.get("vlm_state") == "menu"
+        assert step_info.get("vlm_goal") == "press_start"
+        assert step_info.get("vlm_desc") == "Title menu screen"
+
+        # Check HUD rendering displays VLM status
+        hud = env.render_hud()
+        assert hud is not None
+    finally:
+        env.close()
+
+
+def test_env_cognitive_obs_vector_and_dynamic_hud():
+    from ai_player.cognitive import CognitiveState, CognitiveSupervisor
+
+    class MockSupervisor(CognitiveSupervisor):
+        def __init__(self, cstate: CognitiveState):
+            super().__init__()
+            self._state = cstate
+
+        @property
+        def current_state(self) -> CognitiveState:
+            return self._state
+
+    config = mock_config()
+    config.hud.cognitive_obs = True
+    config.hud.cognitive_dim = 8
+
+    mock_sup = MockSupervisor(
+        CognitiveState(
+            state="gameplay",
+            is_game_over=False,
+            confidence=0.92,
+            suggested_action="up",
+            description="Active play",
+            hud_layout={
+                "score": [25, 20, 110, 30],
+                "hp": [25, 60, 90, 20],
+                "ammo": [25, 85, 70, 15],
+            },
+            vital_stats={
+                "hp_ratio": 0.75,
+                "ammo_ratio": 0.40,
+                "lives": 3.0,
+                "danger_level": 0.15,
+            },
+        )
+    )
+
+    controller = NullController(config.control)
+    _game, frames, audio, _mock_controller = build_mock_backends(config, seed=16)
+    env = GameEnv(
+        config,
+        frame_source=frames,
+        audio_source=audio,
+        controller=controller,
+        supervisor=mock_sup,
+        render_mode="rgb_array",
+    )
+    try:
+        assert "cognitive" in env.observation_space.spaces
+        obs, _info = env.reset()
+        assert "cognitive" in obs
+        assert obs["cognitive"].shape == (8,)
+
+        # Check vector values: [state_code, hp, ammo, lives, danger, action_code, conf, game_over]
+        cog_vec = obs["cognitive"]
+        assert cog_vec[0] == 0.0  # gameplay
+        assert abs(cog_vec[1] - 0.75) < 1e-4  # hp_ratio
+        assert abs(cog_vec[2] - 0.40) < 1e-4  # ammo_ratio
+        assert abs(cog_vec[3] - 0.60) < 1e-4  # lives_ratio (3 / 5)
+        assert abs(cog_vec[4] - 0.15) < 1e-4  # danger_level
+        assert cog_vec[5] > 0.0  # suggested_action "up" mapped
+        assert abs(cog_vec[6] - 0.92) < 1e-4  # vlm_conf
+        assert cog_vec[7] == 0.0  # is_game_over
+
+        # Step and check HUD rendering with dynamic boxes and vital stats
+        obs, _rew, _term, _trunc, _step_info = env.step(0)
+        hud = env.render_hud()
+        assert hud is not None
+        assert hud.shape == (config.capture.region.height, config.capture.region.width, 3)
+
+        # Check dynamic HUD regions updated in observer
+        assert env._observer._reward.score_region.left == 25
+        assert env._observer._reward.score_region.top == 20
+    finally:
+        env.close()
+
+
+def test_env_instant_vlm_game_over_termination():
+    from ai_player.cognitive import CognitiveState, CognitiveSupervisor
+
+    class MockGameOverSupervisor(CognitiveSupervisor):
+        def __init__(self):
+            super().__init__()
+            self._state = CognitiveState(
+                state="game_over",
+                is_game_over=True,
+                confidence=0.95,
+                description="Instant death",
+            )
+
+        @property
+        def current_state(self) -> CognitiveState:
+            return self._state
+
+    config = mock_config()
+    # Detection patience is 2 by default
+    assert config.reward.detection_patience >= 2
+    mock_sup = MockGameOverSupervisor()
+
+    controller = NullController(config.control)
+    _game, frames, audio, _mock_controller = build_mock_backends(config, seed=17)
+    env = GameEnv(
+        config,
+        frame_source=frames,
+        audio_source=audio,
+        controller=controller,
+        supervisor=mock_sup,
+    )
+    try:
+        env.reset()
+        _obs, rew, term, _trunc, _info = env.step(0)
+        # Should terminate immediately on step 1 due to VLM sentinel bypass
+        assert term is True
+        assert rew == pytest.approx(config.reward.game_over_penalty)
+    finally:
+        env.close()
+
+
+
+
 
 

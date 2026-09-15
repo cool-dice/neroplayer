@@ -40,7 +40,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--config", type=Path, default=None, help="JSON config from calibrate.py")
     parser.add_argument("--algo", choices=sorted(ALGOS), default=None, help="RL algorithm")
-    parser.add_argument("--timesteps", type=int, default=None, help="Total environment steps to train for")
+    parser.add_argument(
+        "--timesteps",
+        type=int,
+        default=None,
+        help="Total environment steps to train for (0 or negative for infinite)",
+    )
+    parser.add_argument(
+        "--infinite",
+        action="store_true",
+        help="Train indefinitely until manually stopped with Ctrl+C",
+    )
     parser.add_argument("--run-name", default=None, help="Name for the models/ and logs/ subfolders")
     parser.add_argument("--resume", type=Path, default=None, help="Path to a .zip model to continue training")
     parser.add_argument("--seed", type=int, default=None)
@@ -106,6 +116,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         help="Seconds to wait before starting, so you can focus the game window",
     )
+    parser.add_argument(
+        "--game-over-mode",
+        choices=["auto", "template", "color", "text"],
+        default=None,
+        help="Game over detection mode (auto, template, color, text)",
+    )
     # Architecture & Autonomous Agent flags
     parser.add_argument(
         "--backbone",
@@ -158,6 +174,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Disable controllability probe and dynamic entity tracking",
     )
+    parser.add_argument(
+        "--cognitive-obs",
+        action="store_true",
+        default=None,
+        help="Enable semantic cognitive observation vector in RL observation space",
+    )
+    parser.add_argument(
+        "--no-cognitive-obs",
+        action="store_true",
+        help="Disable semantic cognitive observation vector",
+    )
     return parser.parse_args(argv)
 
 
@@ -166,7 +193,10 @@ def build_config(args: argparse.Namespace) -> AppConfig:
     config = load_config(args.config)
     if args.algo:
         config.train.algo = args.algo
-    if args.timesteps is not None:
+    if args.infinite or (args.timesteps is not None and args.timesteps <= 0):
+        # 100 billion steps is effectively infinite (>50 years at 60 FPS)
+        config.train.total_timesteps = 100_000_000_000
+    elif args.timesteps is not None:
         config.train.total_timesteps = args.timesteps
     if args.seed is not None:
         config.train.seed = args.seed
@@ -184,6 +214,8 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.reward.movement_reward = args.movement_reward
     if args.idle_diff_threshold is not None:
         config.reward.idle_diff_threshold = args.idle_diff_threshold
+    if args.game_over_mode:
+        config.reward.game_over_mode = args.game_over_mode
     if args.auto_combos:
         config.control.auto_combos = True
     if args.max_combo_size is not None:
@@ -207,6 +239,10 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.tracker.enabled = True
     if args.no_auto_tracker:
         config.tracker.enabled = False
+    if args.cognitive_obs:
+        config.hud.cognitive_obs = True
+    if args.no_cognitive_obs:
+        config.hud.cognitive_obs = False
     return config
 
 

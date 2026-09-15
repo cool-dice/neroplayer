@@ -118,11 +118,13 @@ class AudioConfig:
 
 @dataclass
 class ControlConfig:
-    """Mapping from discrete agent actions to keyboard keys."""
+    """Mapping from discrete agent actions to keyboard and mouse actions."""
 
     # Index == action id. ``None`` is an explicit no-op, which the agent needs in
     # order to *not* act -- without it every step would perturb the game.
-    # Supports single keys ('d'), combos ('d+space' or ['d', 'space']), and None.
+    # Supports single keys ('d'), combos ('d+space' or ['d', 'space']),
+    # mouse actions ('mouse_left', 'mouse_right', 'aim_left', etc.),
+    # compound keyboard+mouse ('w+mouse_left', ['w', 'mouse_left']), and None.
     action_keys: list[Any] = field(default_factory=lambda: ["up", "down", None])
     # When auto_combos=True, generates all simultaneous combinations up to max_combo_size
     # from available single keys, so the agent can learn and discover which combos work.
@@ -136,6 +138,11 @@ class ControlConfig:
     # Hold the key for the whole step instead of tapping it. Useful for games
     # where movement is continuous while a key is down.
     hold_keys: bool = False
+    # Mouse controller settings
+    mouse_enabled: bool = False
+    mouse_mode: str = "relative"  # "relative" for 3D FPS aiming, "absolute" for RTS cursor clicking
+    mouse_sensitivity: float = 1.0
+    aim_step: int = 15  # discrete pixel step for relative camera turns in discrete action mode
     # pydirectinput inserts a global pause after every call; we manage our own
     # timing, so disable it.
     pause_between_calls: float = 0.0
@@ -161,6 +168,21 @@ class RewardConfig:
     max_score_delta: int = 50
 
     # --- Game-over detection -------------------------------------------------
+    # Mode for detecting game over: "auto", "template", "color", "text".
+    game_over_mode: str = "auto"
+    # Keywords searched by autonomous text detection and OCR.
+    game_over_keywords: list[str] = field(
+        default_factory=lambda: [
+            "GAME OVER",
+            "CONTINUE",
+            "YOU DIED",
+            "DEFEAT",
+            "MISSION FAILED",
+            "TRY AGAIN",
+        ]
+    )
+    # Detection confidence threshold [0.0, 1.0] for autonomous game-over detector.
+    game_over_threshold: float = 0.65
     # Region (relative to the capture region) inspected for the game-over cue.
     game_over_region: Region = field(default_factory=lambda: Region(left=200, top=200, width=400, height=200))
     # Path to a grayscale template crop. When present, cv2.matchTemplate is
@@ -279,13 +301,20 @@ class TrackerConfig:
 
 @dataclass
 class HUDConfig:
-    """Settings for Autonomous HUD Detection (VLM + heuristic fallback)."""
+    """Settings for Autonomous HUD Detection & Cognitive VLM Supervisor."""
 
     auto_detect: bool = True
     use_vlm: bool = False
     vlm_endpoint: str = "http://localhost:11434/api/generate"  # Ollama / OpenAI-compatible
     vlm_model: str = "qwen2.5-vl"
     vlm_timeout: float = 3.0
+    # Asynchronous VLM Sentinel & Cognitive Game Supervisor
+    vlm_sentinel_interval: float = 2.0
+    auto_menu_nav: bool = True
+    guidance_enabled: bool = True
+    # Semantic Cognitive Observation Space for RL
+    cognitive_obs: bool = False
+    cognitive_dim: int = 8
 
 
 @dataclass

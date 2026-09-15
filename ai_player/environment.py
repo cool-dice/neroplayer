@@ -27,8 +27,15 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
+from .cognitive import CognitiveSupervisor
 from .config import AppConfig
-from .controls import ActionController, build_controller, format_action, get_effective_action_keys
+from .controls import (
+    ActionController,
+    build_controller,
+    format_action,
+    get_effective_action_keys,
+    parse_action_keys,
+)
 from .observer import GameObserver
 from .perception import (
     AudioFeatureExtractor,
@@ -69,6 +76,7 @@ class GameEnv(gym.Env):
         audio_source: AudioSource | None = None,
         controller: ActionController | None = None,
         observer: GameObserver | None = None,
+        supervisor: CognitiveSupervisor | None = None,
         render_mode: str | None = None,
     ) -> None:
         super().__init__()
@@ -78,7 +86,23 @@ class GameEnv(gym.Env):
         self._frames = frame_source or ScreenCapture(self.config.capture)
         self._audio = audio_source or build_audio_source(self.config.audio)
         self._controller = controller or build_controller(self.config.control)
-        self._observer = observer or GameObserver(self.config.reward, hud_config=self.config.hud)
+
+        # Cognitive supervisor lifecycle
+        self._supervisor = supervisor
+        if self._supervisor is None:
+            self._supervisor = (
+                observer.supervisor
+                if observer is not None and observer.supervisor is not None
+                else CognitiveSupervisor(self.config.hud)
+            )
+        if self.config.hud.use_vlm and not self._supervisor.is_running:
+            self._supervisor.start()
+
+        self._observer = observer or GameObserver(
+            self.config.reward,
+            hud_config=self.config.hud,
+            supervisor=self._supervisor,
+        )
         # Idempotent: build_audio_source already started the recorder it built,
         # but an injected source may not be running yet.
         self._audio.start()
@@ -98,6 +122,10 @@ class GameEnv(gym.Env):
         if self._audio_enabled:
             obs_spaces["audio"] = spaces.Box(
                 low=0.0, high=1.0, shape=self.config.audio.observation_shape, dtype=np.float32
+            )
+        if self.config.hud.cognitive_obs:
+            obs_spaces["cognitive"] = spaces.Box(
+                low=0.0, high=1.0, shape=(self.config.hud.cognitive_dim,), dtype=np.float32
             )
         self.observation_space = spaces.Dict(obs_spaces)
         self._action_keys = get_effective_action_keys(self.config.control)
@@ -121,6 +149,11 @@ class GameEnv(gym.Env):
         self._episode_index = 0
         self._window_name = "ai-player"
         self._window_open = False
+
+    @property
+    def supervisor(self) -> CognitiveSupervisor:
+        """The cognitive supervisor / VLM sentinel instance."""
+        return self._supervisor
 
     @property
     def last_frame(self) -> np.ndarray | None:
@@ -204,10 +237,30 @@ class GameEnv(gym.Env):
         t2 = time.perf_counter()
         self._prof_grab.append((t2 - t1) * 1000.0)
 
+        # Feed frame to cognitive supervisor
+        if self._supervisor is not None:
+            self._supervisor.update_frame(frame)
+
         self._stack.push(self._processor.process(frame))
         verdict = self._observer.evaluate(frame)
         t3 = time.perf_counter()
         self._prof_proc.append((t3 - t2) * 1000.0)
+
+        cstate = self._supervisor.current_state if self._supervisor is not None else None
+
+        # Dynamic HUD adaptation: if supervisor provides updated hud_layout, adapt observer regions
+        if cstate is not None and cstate.hud_layout:
+            self._observer.update_dynamic_hud(cstate.hud_layout)
+
+        # Auto Menu Navigation: if VLM supervisor identifies a MENU state,
+        # automatically tap restart/start keys to navigate past the menu.
+        if (
+            cstate is not None
+            and self.config.hud.auto_menu_nav
+            and cstate.state == "menu"
+            and not verdict.terminated
+        ):
+            self._controller.restart()
 
         self._episode_steps += 1
         self._episode_reward += verdict.reward
@@ -262,6 +315,33 @@ class GameEnv(gym.Env):
                     "conf": e.confidence,
                 })
 
+        # Determine active mouse action details for telemetry
+        action_idx_val = int(action)
+        mouse_active_info: dict[str, Any] = {"aim": (0, 0), "clicks": []}
+        if 0 <= action_idx_val < len(self._action_keys):
+            for t in parse_action_keys(self._action_keys[action_idx_val]):
+                tl = t.lower()
+                from .controls import MOUSE_AIM_ACTIONS, MOUSE_CLICK_ACTIONS
+
+                if tl in MOUSE_AIM_ACTIONS:
+                    step_u = MOUSE_AIM_ACTIONS[tl]
+                    s_step = self.config.control.aim_step
+                    mouse_active_info["aim"] = (step_u[0] * s_step, step_u[1] * s_step)
+                elif tl in MOUSE_CLICK_ACTIONS:
+                    mouse_active_info["clicks"].append(MOUSE_CLICK_ACTIONS[tl])
+
+        cog_info: dict[str, Any] = {}
+        if cstate is not None:
+            cog_info = {
+                "vlm_state": cstate.state,
+                "vlm_goal": cstate.suggested_action,
+                "vlm_desc": cstate.description,
+                "vlm_is_game_over": cstate.is_game_over,
+                "vlm_confidence": cstate.confidence,
+                "vlm_hud_layout": dict(cstate.hud_layout),
+                "vlm_vital_stats": dict(cstate.vital_stats),
+            }
+
         info: dict[str, Any] = {
             "score": verdict.score,
             "points": verdict.points,
@@ -272,9 +352,11 @@ class GameEnv(gym.Env):
             "frame_diff": verdict.frame_diff,
             "is_idle": verdict.is_idle,
             "action": int(action),
+            "mouse": mouse_active_info,
             "player_bbox": player_bbox_dict,
             "entities": tracked_entities,
             "collisions": collision_events,
+            **cog_info,
         }
         # Benchmarking telemetry for HUD, diagnostics and logging
         self._last_info = {
@@ -302,7 +384,7 @@ class GameEnv(gym.Env):
         out = frame.copy()
         h, w = out.shape[:2]
 
-        # Draw ROI boxes
+        # Draw ROI boxes (static/configured)
         boxes = [
             (self.config.reward.score_region, (0, 255, 0)),
             (self.config.reward.game_over_region, (0, 0, 255)),
@@ -314,6 +396,41 @@ class GameEnv(gym.Env):
             y2 = max(y1, min(region.top + region.height, h))
             if x2 > x1 and y2 > y1:
                 cv2.rectangle(out, (x1, y1), (x2, y2), colour, 1)
+
+        # Draw dynamic HUD bounding boxes provided by the supervisor
+        dynamic_layout = {}
+        if self._supervisor is not None:
+            dynamic_layout = self._supervisor.dynamic_hud_layout or self._supervisor.current_state.hud_layout
+        if not dynamic_layout and "vlm_hud_layout" in self._last_info:
+            dynamic_layout = self._last_info["vlm_hud_layout"]
+
+        for name, bbox in dynamic_layout.items():
+            if len(bbox) == 4 and bbox[2] > 0 and bbox[3] > 0:
+                bx, by, bw, bh = bbox[0], bbox[1], bbox[2], bbox[3]
+                bx1 = max(0, min(bx, w))
+                by1 = max(0, min(by, h))
+                bx2 = max(bx1, min(bx + bw, w))
+                by2 = max(by1, min(by + bh, h))
+                lname = name.lower()
+                if lname == "score":
+                    b_color = (0, 255, 0)  # Green for score
+                elif lname in ("game_over", "defeat"):
+                    b_color = (0, 0, 255)  # Red for game over
+                elif lname in ("hp", "ammo", "lives"):
+                    b_color = (255, 255, 0)  # Cyan (BGR: 255, 255, 0) for HP/ammo/lives
+                else:
+                    b_color = (255, 200, 0)  # Cyan-blue
+                cv2.rectangle(out, (bx1, by1), (bx2, by2), b_color, 2)
+                cv2.putText(
+                    out,
+                    f"HUD:{name.upper()}",
+                    (bx1, max(12, by1 - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.38,
+                    b_color,
+                    1,
+                    cv2.LINE_AA,
+                )
 
         # Draw detected player avatar BBox and dynamic entities
         if self.config.tracker.enabled:
@@ -366,18 +483,33 @@ class GameEnv(gym.Env):
                 cv2.arrowedLine(out, (cx, cy), (tip_x, tip_y), e_color, 1, tipLength=0.3)
 
         # Draw semi-transparent telemetry bar at the top
-        bar_height = min(112, max(44, h // 3))
+        bar_height = min(150, max(44, h // 3))
         overlay = out.copy()
         cv2.rectangle(overlay, (0, 0), (w, bar_height), (18, 18, 18), -1)
         cv2.addWeighted(overlay, 0.75, out, 0.25, 0, out)
 
         action_idx = self._last_info.get("action")
         keys = self._action_keys
+        active_tokens: tuple[str, ...] = ()
         if action_idx is not None and 0 <= action_idx < len(keys):
+            active_tokens = parse_action_keys(keys[action_idx])
             action_name = format_action(keys[action_idx])
             action_text = f"ACTIVE [{action_idx}]: [{action_name}]"
         else:
             action_text = "ACTIVE: --"
+
+        # Check for mouse actions in active action
+        mouse_parts = []
+        for token in active_tokens:
+            lower = token.lower()
+            from .controls import MOUSE_AIM_ACTIONS, MOUSE_CLICK_ACTIONS
+
+            if lower in MOUSE_CLICK_ACTIONS:
+                mouse_parts.append(f"CLICK({MOUSE_CLICK_ACTIONS[lower].upper()})")
+            elif lower in MOUSE_AIM_ACTIONS:
+                dx, dy = MOUSE_AIM_ACTIONS[lower]
+                mouse_parts.append(f"AIM({dx:+d},{dy:+d})")
+        mouse_telemetry = f" | MOUSE: {', '.join(mouse_parts)}" if mouse_parts else ""
 
         ep_rew = self._last_info.get("episode_reward", 0.0)
         ep_step = self._last_info.get("episode_steps", 0)
@@ -412,10 +544,10 @@ class GameEnv(gym.Env):
             cv2.LINE_AA,
         )
 
-        # Line 2: Active action & Motion Status
+        # Line 2: Active action, Mouse Telemetry & Motion Status
         cv2.putText(
             out,
-            f"{action_text} | DIFF: {frame_diff * 100:4.1f}% [{motion_status}]",
+            f"{action_text}{mouse_telemetry} | DIFF: {frame_diff * 100:4.1f}% [{motion_status}]",
             (10, 42),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.50,
@@ -488,6 +620,58 @@ class GameEnv(gym.Env):
             1,
             cv2.LINE_AA,
         )
+
+        # Line 6: Cognitive VLM Supervisor Status & Tactical Guidance
+        vlm_st = self._last_info.get("vlm_state", "NONE").upper()
+        vlm_desc = self._last_info.get("vlm_desc", "")
+        vlm_goal = self._last_info.get("vlm_goal")
+        goal_str = f" | GOAL: {vlm_goal.upper()}" if vlm_goal else ""
+        desc_str = f' "{vlm_desc}"' if vlm_desc else ""
+        cog_text = f"VLM: [{vlm_st}]{desc_str}{goal_str}"
+        if len(cog_text) > 85:
+            cog_text = cog_text[:82] + "..."
+
+        if vlm_st in ("GAME_OVER", "DEFEAT"):
+            cog_color = (0, 0, 255)  # Red
+        elif vlm_st == "MENU":
+            cog_color = (0, 255, 255)  # Yellow
+        elif vlm_st == "GAMEPLAY":
+            cog_color = (0, 255, 128)  # Light green
+        else:
+            cog_color = (200, 200, 200)
+
+        cv2.putText(
+            out,
+            cog_text,
+            (10, 120),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            cog_color,
+            1,
+            cv2.LINE_AA,
+        )
+
+        # Line 7: Vital stats telemetry (HP, Ammo, Lives, Danger)
+        vitals = self._last_info.get("vlm_vital_stats")
+        if not vitals and self._supervisor is not None:
+            vitals = self._supervisor.current_state.vital_stats
+        if vitals:
+            hp = vitals.get("hp_ratio", 1.0) * 100.0
+            ammo = vitals.get("ammo_ratio", 1.0) * 100.0
+            danger = vitals.get("danger_level", 0.0)
+            danger_str = "HIGH" if danger >= 0.7 else ("MED" if danger >= 0.3 else "LOW")
+            lives_str = f" | LIVES: {vitals['lives']:.0f}" if "lives" in vitals else ""
+            vital_text = f"VITALS: HP: {hp:3.0f}% | AMMO: {ammo:3.0f}% | DANGER: {danger_str}{lives_str}"
+            cv2.putText(
+                out,
+                vital_text,
+                (10, 138),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                (0, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
 
         # Picture-in-Picture: Visualizing the Neural Network's actual observation
         try:
@@ -613,6 +797,8 @@ class GameEnv(gym.Env):
         return None
 
     def close(self) -> None:
+        if hasattr(self, "_supervisor") and self._supervisor is not None:
+            self._supervisor.stop()
         self._controller.release_all()
         self._audio.stop()
         self._frames.close()
@@ -625,7 +811,56 @@ class GameEnv(gym.Env):
         obs: dict[str, np.ndarray] = {"frames": self._stack.observation}
         if self._audio_enabled:
             obs["audio"] = self._audio_features.extract(self._audio.read_window())
+        if self.config.hud.cognitive_obs:
+            obs["cognitive"] = self._build_cognitive_vector()
         return obs
+
+    def _build_cognitive_vector(self) -> np.ndarray:
+        """Construct normalized semantic cognitive vector:
+        [state_code, hp_ratio, ammo_ratio, lives_ratio, danger, action_code, conf, game_over].
+        """
+        dim = self.config.hud.cognitive_dim
+        vec = np.zeros((dim,), dtype=np.float32)
+
+        state_map = {
+            "gameplay": 0.0,
+            "menu": 0.25,
+            "cutscene": 0.5,
+            "loading": 0.75,
+            "game_over": 1.0,
+            "defeat": 1.0,
+        }
+
+        if self._supervisor is not None:
+            cstate = self._supervisor.current_state
+            # 0: state_code
+            vec[0] = state_map.get(cstate.state.lower(), 0.0)
+            # 1: hp_ratio
+            vec[1] = float(np.clip(cstate.vital_stats.get("hp_ratio", 1.0), 0.0, 1.0))
+            # 2: ammo_ratio
+            vec[2] = float(np.clip(cstate.vital_stats.get("ammo_ratio", 1.0), 0.0, 1.0))
+            # 3: lives_ratio (normalized against e.g. 5 lives max or lives float directly)
+            raw_lives = cstate.vital_stats.get("lives", 3.0)
+            vec[3] = float(np.clip(raw_lives / 5.0 if raw_lives > 1.0 else raw_lives, 0.0, 1.0))
+            # 4: danger_level
+            vec[4] = float(np.clip(cstate.vital_stats.get("danger_level", 0.0), 0.0, 1.0))
+            # 5: suggested_action_code (mapped against effective action keys if possible)
+            act_code = 0.0
+            if cstate.suggested_action:
+                s_act = cstate.suggested_action.lower().strip()
+                for i, k in enumerate(self._action_keys):
+                    if k is not None and str(k).lower() in s_act:
+                        act_code = (i + 1) / max(1, len(self._action_keys))
+                        break
+                if act_code == 0.0:
+                    act_code = 0.5
+            vec[5] = float(np.clip(act_code, 0.0, 1.0))
+            # 6: vlm_conf
+            vec[6] = float(np.clip(cstate.confidence, 0.0, 1.0))
+            # 7: is_game_over
+            vec[7] = 1.0 if (cstate.is_game_over or cstate.state in ("game_over", "defeat")) else 0.0
+
+        return vec
 
     def _capture_frame(self) -> np.ndarray:
         """Grab the next frame, holding the configured decision rate."""
@@ -650,7 +885,11 @@ class GameEnv(gym.Env):
         """Block until the game-over screen clears, or the timeout expires."""
         deadline = time.perf_counter() + self.config.env.reset_timeout
         frame = self._frames.grab()
-        while self._observer.is_game_over(frame):
+        while self._observer.is_game_over(frame) or (
+            self._supervisor is not None
+            and self._supervisor.is_running
+            and self._supervisor.current_state.is_game_over
+        ):
             if time.perf_counter() >= deadline:
                 # Re-tap restart once; some games need the input twice (e.g. a
                 # confirmation prompt) and we would otherwise start an episode
@@ -687,6 +926,7 @@ def make_env(
     *,
     mock: bool = False,
     dry_run: bool = False,
+    supervisor: CognitiveSupervisor | None = None,
     render_mode: str | None = None,
     seed: int | None = None,
 ) -> GameEnv:
@@ -707,6 +947,7 @@ def make_env(
             frame_source=frames,
             audio_source=audio,
             controller=controller,
+            supervisor=supervisor,
             render_mode=render_mode,
         )
 
@@ -714,5 +955,6 @@ def make_env(
     return GameEnv(
         config,
         controller=build_controller(config.control, dry_run=dry_run),
+        supervisor=supervisor,
         render_mode=render_mode,
     )
