@@ -14,24 +14,49 @@ Provides:
 
 from __future__ import annotations
 
-import base64
 import contextlib
-import json
 import logging
 import threading
 import time
-import urllib.error
-import urllib.request
-import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
-
-import cv2
 
 from .config import HUDConfig
 from .perception import BGRFrame
+from .vlm_client import parse_vlm_json, query_vlm, rescale_boxes
+
+__all__ = [
+    "AsyncVLMSentinel",
+    "CognitiveState",
+    "CognitiveSupervisor",
+    "parse_vlm_json",
+]
 
 logger = logging.getLogger(__name__)
+
+# Upper bound for the exponential backoff applied after consecutive endpoint failures.
+_MAX_BACKOFF_SECONDS = 30.0
+# Longest single wait inside the worker so ``stop()`` is always honoured promptly.
+_IDLE_WAIT_SECONDS = 0.2
+
+_VALID_STATES = frozenset({"gameplay", "game_over", "menu", "cutscene", "loading"})
+
+_SENTINEL_PROMPT = (
+    "Analyze this video game screenshot. Return a JSON object with exactly these fields:\n"
+    '1. "state": string, one of ["gameplay", "game_over", "menu", "cutscene", "loading"]\n'
+    '2. "game_over": boolean (true if player died or game over screen is shown, false otherwise)\n'
+    '3. "confidence": float between 0.0 and 1.0\n'
+    '4. "suggested_action": string or null (e.g. "press_start", "fire", "restart")\n'
+    '5. "description": short string (max 15 words) describing what is happening\n'
+    '6. "hud_layout": optional dict of bounding boxes [x, y, w, h] for HUD elements '
+    'e.g. {"score": [x,y,w,h], "hp": [x,y,w,h], "ammo": [x,y,w,h], "game_over": [x,y,w,h]}\n'
+    '7. "vital_stats": optional dict of gameplay statistics e.g. '
+    '{"hp_ratio": 0.0-1.0, "ammo_ratio": 0.0-1.0, "lives": int/float, "danger_level": 0.0-1.0}\n\n'
+    'Respond ONLY with valid JSON. Example: {"state": "gameplay", "game_over": false, '
+    '"confidence": 0.95, "suggested_action": "fire", "description": "Space battle", '
+    '"hud_layout": {"score": [10, 10, 100, 30], "hp": [10, 50, 120, 20]}, '
+    '"vital_stats": {"hp_ratio": 0.85, "ammo_ratio": 0.5, "lives": 3.0, "danger_level": 0.2}}'
+)
 
 
 @dataclass
@@ -47,33 +72,24 @@ class CognitiveState:
     vital_stats: dict[str, float] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
     raw_response: dict[str, Any] = field(default_factory=dict)
+    # False for the placeholder state held before the first successful VLM
+    # query (and after ``CognitiveSupervisor.reset``); such states are never
+    # "fresh" regardless of their timestamp.
+    valid: bool = False
 
+    @property
+    def age(self) -> float:
+        """Seconds elapsed since this verdict was produced."""
+        return max(0.0, time.time() - self.timestamp)
 
-def parse_vlm_json(content: str | dict[str, Any]) -> dict[str, Any]:
-    """Parse JSON from raw VLM response string, handling markdown fences and surrounding text."""
-    if isinstance(content, dict):
-        return content
-    if not isinstance(content, str):
-        return {}
+    def is_fresh(self, max_age: float) -> bool:
+        """True if this is a real VLM verdict no older than ``max_age`` seconds."""
+        return self.valid and self.age <= max_age
 
-    cleaned = content.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
-
-    start_brace = cleaned.find("{")
-    end_brace = cleaned.rfind("}")
-    if start_brace != -1 and end_brace != -1 and end_brace > start_brace:
-        cleaned = cleaned[start_brace : end_brace + 1]
-
-    try:
-        return json.loads(cleaned)
-    except Exception:
-        return {}
+    @property
+    def signals_game_over(self) -> bool:
+        """True if the model reported game over via either the flag or the state label."""
+        return self.is_game_over or self.state in ("game_over", "defeat")
 
 
 class CognitiveSupervisor:
@@ -81,6 +97,11 @@ class CognitiveSupervisor:
 
     Periodically queries the configured VLM endpoint in a background daemon thread
     without blocking the primary agent decision loop.
+
+    Threading model: everything read by the game loop (``_current_state``,
+    ``_dynamic_hud_layout``, ``_latest_frame``, counters) is guarded by
+    ``_lock``. Pacing bookkeeping (``_next_query_at``, ``_backoff``) is touched
+    only by the worker thread and needs no lock.
     """
 
     def __init__(
@@ -88,25 +109,9 @@ class CognitiveSupervisor:
         config: HUDConfig | None = None,
         *,
         interval: float | None = None,
-        auto_menu_nav: bool | None = None,
-        guidance_enabled: bool | None = None,
     ) -> None:
         self.config = config or HUDConfig()
-        self.interval = (
-            interval
-            if interval is not None
-            else getattr(self.config, "vlm_sentinel_interval", 2.0)
-        )
-        self.auto_menu_nav = (
-            auto_menu_nav
-            if auto_menu_nav is not None
-            else getattr(self.config, "auto_menu_nav", True)
-        )
-        self.guidance_enabled = (
-            guidance_enabled
-            if guidance_enabled is not None
-            else getattr(self.config, "guidance_enabled", True)
-        )
+        self.interval = float(interval if interval is not None else self.config.vlm_sentinel_interval)
 
         self._lock = threading.Lock()
         self._latest_frame: BGRFrame | None = None
@@ -114,11 +119,15 @@ class CognitiveSupervisor:
         self._stop_event = threading.Event()
         self._worker_thread: threading.Thread | None = None
 
-        # Thread-safe telemetry state
+        # Guarded by ``_lock``.
         self._current_state = CognitiveState()
         self._dynamic_hud_layout: dict[str, list[int]] = {}
         self._query_count = 0
-        self._last_query_time = 0.0
+        self._consecutive_failures = 0
+
+        # Worker-thread only (monotonic clock).
+        self._next_query_at = 0.0
+        self._backoff = self.interval
 
     @property
     def is_running(self) -> bool:
@@ -129,21 +138,17 @@ class CognitiveSupervisor:
     def current_state(self) -> CognitiveState:
         """Return a copy of the latest thread-safe cognitive state."""
         with self._lock:
-            return CognitiveState(
-                state=self._current_state.state,
-                is_game_over=self._current_state.is_game_over,
-                confidence=self._current_state.confidence,
-                suggested_action=self._current_state.suggested_action,
-                description=self._current_state.description,
-                hud_layout=dict(self._current_state.hud_layout),
-                vital_stats=dict(self._current_state.vital_stats),
-                timestamp=self._current_state.timestamp,
-                raw_response=dict(self._current_state.raw_response),
+            src = self._current_state
+            return replace(
+                src,
+                hud_layout=dict(src.hud_layout),
+                vital_stats=dict(src.vital_stats),
+                raw_response=dict(src.raw_response),
             )
 
     @property
     def dynamic_hud_layout(self) -> dict[str, list[int]]:
-        """Return the latest dynamic HUD layout bounding boxes."""
+        """Return the latest dynamic HUD layout bounding boxes (full-frame coordinates)."""
         with self._lock:
             return dict(self._dynamic_hud_layout)
 
@@ -170,6 +175,18 @@ class CognitiveSupervisor:
         with self._lock:
             return self._current_state.description
 
+    @property
+    def query_count(self) -> int:
+        """Number of successful VLM queries since construction."""
+        with self._lock:
+            return self._query_count
+
+    @property
+    def failure_count(self) -> int:
+        """Length of the current streak of consecutive failed queries (0 after a success)."""
+        with self._lock:
+            return self._consecutive_failures
+
     def start(self) -> None:
         """Start the background daemon sentinel thread."""
         if self.is_running:
@@ -185,10 +202,23 @@ class CognitiveSupervisor:
     def stop(self, timeout: float = 2.0) -> None:
         """Stop the background sentinel thread cleanly."""
         self._stop_event.set()
+        # Wake a worker blocked waiting for its first frame.
         self._new_frame_event.set()
         if self._worker_thread is not None:
             self._worker_thread.join(timeout=timeout)
             self._worker_thread = None
+
+    def reset(self) -> None:
+        """Forget the last verdict and frame at an episode boundary.
+
+        Without this the terminal game-over screenshot would be re-queried (and
+        re-confirmed) for the whole of the next ``reset()``, stalling it until
+        ``env.reset_timeout`` and terminating the next episode on its first step.
+        The worker thread keeps running; it simply waits for the next frame.
+        """
+        with self._lock:
+            self._current_state = CognitiveState()
+            self._latest_frame = None
 
     def update_frame(self, frame: BGRFrame | None) -> None:
         """Pass the latest gameplay frame to the sentinel (non-blocking)."""
@@ -199,125 +229,81 @@ class CognitiveSupervisor:
         self._new_frame_event.set()
 
     def _worker_loop(self) -> None:
-        """Background daemon polling loop."""
+        """Background daemon polling loop.
+
+        Starts at most one query per ``interval`` seconds (stretched by the
+        failure backoff), and only when a frame is available; with no frame it
+        blocks on ``_new_frame_event`` instead of spinning.
+        """
         while not self._stop_event.is_set():
-            # Wait for next interval or new frame
-            now = time.time()
-            elapsed = now - self._last_query_time
-            if elapsed < self.interval:
-                sleep_time = min(self.interval - elapsed, 0.2)
-                if self._stop_event.wait(sleep_time):
-                    break
-
-            # Grab current latest frame
-            frame_to_process: BGRFrame | None = None
-            with self._lock:
-                if self._latest_frame is not None:
-                    frame_to_process = self._latest_frame.copy()
-
-            if frame_to_process is None or not self.config.use_vlm:
-                # If VLM is disabled or no frame, idle brief period
-                if self._stop_event.wait(0.2):
-                    break
+            if not self.config.use_vlm:
+                self._stop_event.wait(_IDLE_WAIT_SECONDS)
                 continue
 
+            remaining = self._next_query_at - time.monotonic()
+            if remaining > 0:
+                self._stop_event.wait(min(remaining, _IDLE_WAIT_SECONDS))
+                continue
+
+            # Clear before reading so a frame published in between is not missed:
+            # update_frame stores the frame first and sets the event afterwards.
+            self._new_frame_event.clear()
+            with self._lock:
+                frame = self._latest_frame
+            if frame is None:
+                self._new_frame_event.wait(_IDLE_WAIT_SECONDS)
+                continue
+
+            started = time.monotonic()
             try:
-                state = self._query_vlm(frame_to_process)
-                with self._lock:
-                    self._current_state = state
-                    if state.hud_layout:
-                        self._dynamic_hud_layout.update(state.hud_layout)
-                    self._last_query_time = time.time()
-                    self._query_count += 1
+                state = self._query_vlm(frame)
             except Exception as exc:
-                warnings.warn(
-                    f"AsyncVLMSentinel query failed ({exc})",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                self._last_query_time = time.time()
+                self._on_query_failure(exc, started)
+            else:
+                self._on_query_success(state, started)
+
+    def _on_query_success(self, state: CognitiveState, started: float) -> None:
+        with self._lock:
+            self._current_state = state
+            if state.hud_layout:
+                self._dynamic_hud_layout.update(state.hud_layout)
+            self._query_count += 1
+            recovered_after = self._consecutive_failures
+            self._consecutive_failures = 0
+        if recovered_after:
+            logger.info("AsyncVLMSentinel recovered after %d failed queries", recovered_after)
+        self._backoff = self.interval
+        self._next_query_at = started + self.interval
+
+    def _on_query_failure(self, exc: BaseException, started: float) -> None:
+        with self._lock:
+            self._consecutive_failures += 1
+            streak = self._consecutive_failures
+        if streak == 1:
+            logger.warning("AsyncVLMSentinel query failed (%s); backing off", exc)
+        else:
+            logger.debug("AsyncVLMSentinel query failed again (%d in a row): %s", streak, exc)
+        self._next_query_at = started + self._backoff
+        self._backoff = min(self._backoff * 2.0, _MAX_BACKOFF_SECONDS)
 
     def _query_vlm(self, frame: BGRFrame) -> CognitiveState:
-        """Synchronously query the VLM endpoint with the given frame."""
-        h, w = frame.shape[:2]
-        # Downscale frame if overly large to reduce HTTP latency and tokens
-        target_frame = frame
-        if max(h, w) > 640:
-            scale = 640.0 / max(h, w)
-            target_frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        """Synchronously query the VLM endpoint with the given frame.
 
-        success, buffer = cv2.imencode(".jpg", target_frame)
-        if not success:
-            return self.current_state
-        b64_image = base64.b64encode(buffer).decode("utf-8")
-
-        prompt = (
-            "Analyze this video game screenshot. Return a JSON object with exactly these fields:\n"
-            '1. "state": string, one of ["gameplay", "game_over", "menu", "cutscene", "loading"]\n'
-            '2. "game_over": boolean (true if player died or game over screen is shown, false otherwise)\n'
-            '3. "confidence": float between 0.0 and 1.0\n'
-            '4. "suggested_action": string or null (e.g. "press_start", "fire", "restart")\n'
-            '5. "description": short string (max 15 words) describing what is happening\n'
-            '6. "hud_layout": optional dict of bounding boxes [x, y, w, h] for HUD elements '
-            'e.g. {"score": [x,y,w,h], "hp": [x,y,w,h], "ammo": [x,y,w,h], "game_over": [x,y,w,h]}\n'
-            '7. "vital_stats": optional dict of gameplay statistics e.g. '
-            '{"hp_ratio": 0.0-1.0, "ammo_ratio": 0.0-1.0, "lives": int/float, "danger_level": 0.0-1.0}\n\n'
-            'Respond ONLY with valid JSON. Example: {"state": "gameplay", "game_over": false, '
-            '"confidence": 0.95, "suggested_action": "fire", "description": "Space battle", '
-            '"hud_layout": {"score": [10, 10, 100, 30], "hp": [10, 50, 120, 20]}, '
-            '"vital_stats": {"hp_ratio": 0.85, "ammo_ratio": 0.5, "lives": 3.0, "danger_level": 0.2}}'
+        Network, encoding and decoding errors propagate to the caller.
+        """
+        parsed, scale = query_vlm(
+            self.config,
+            frame,
+            _SENTINEL_PROMPT,
+            max_dim=self.config.vlm_max_image_dim,
         )
+        return self._state_from_response(parsed, scale)
 
-        is_openai = "chat/completions" in self.config.vlm_endpoint or "/v1/" in self.config.vlm_endpoint
-        if is_openai:
-            payload_dict = {
-                "model": self.config.vlm_model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"},
-                            },
-                        ],
-                    }
-                ],
-                "stream": False,
-                "temperature": 0.1,
-            }
-        else:
-            payload_dict = {
-                "model": self.config.vlm_model,
-                "prompt": prompt,
-                "images": [b64_image],
-                "stream": False,
-                "format": "json",
-            }
-
-        payload = json.dumps(payload_dict).encode("utf-8")
-        req = urllib.request.Request(
-            self.config.vlm_endpoint,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=self.config.vlm_timeout) as response:
-            res_data = json.loads(response.read().decode("utf-8"))
-
-        content = ""
-        if "choices" in res_data and len(res_data["choices"]) > 0:
-            choice = res_data["choices"][0]
-            content = choice.get("message", {}).get("content", "")
-        elif "response" in res_data:
-            content = res_data["response"]
-        elif "content" in res_data:
-            content = res_data["content"]
-
-        parsed = parse_vlm_json(content)
+    @staticmethod
+    def _state_from_response(parsed: dict[str, Any], scale: float) -> CognitiveState:
+        """Normalise a parsed model reply into a ``CognitiveState`` in full-frame coordinates."""
         state_str = str(parsed.get("state", "gameplay")).lower().strip()
-        valid_states = {"gameplay", "game_over", "menu", "cutscene", "loading"}
-        if state_str not in valid_states:
+        if state_str not in _VALID_STATES:
             state_str = "gameplay"
 
         raw_go = parsed.get("game_over")
@@ -326,13 +312,14 @@ class CognitiveSupervisor:
         elif isinstance(raw_go, str):
             is_go = raw_go.lower() in ("true", "1", "yes")
         else:
-            is_go = (state_str == "game_over")
+            is_go = state_str == "game_over"
 
+        # An absent/garbled confidence must never clear the game-over threshold.
         try:
-            conf = float(parsed.get("confidence", 0.8))
+            conf = float(parsed.get("confidence", 0.0))
             conf = max(0.0, min(1.0, conf))
         except (ValueError, TypeError):
-            conf = 0.8
+            conf = 0.0
 
         action = parsed.get("suggested_action")
         if action is not None:
@@ -342,7 +329,6 @@ class CognitiveSupervisor:
 
         desc = str(parsed.get("description", "")).strip()
 
-        # Parse hud_layout
         hud_layout: dict[str, list[int]] = {}
         raw_hud = parsed.get("hud_layout")
         if isinstance(raw_hud, dict):
@@ -350,8 +336,8 @@ class CognitiveSupervisor:
                 if isinstance(box, (list, tuple)) and len(box) >= 4:
                     with contextlib.suppress(ValueError, TypeError):
                         hud_layout[str(k).lower()] = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+        hud_layout = rescale_boxes(hud_layout, scale)
 
-        # Parse vital_stats
         vital_stats: dict[str, float] = {}
         raw_vitals = parsed.get("vital_stats")
         if isinstance(raw_vitals, dict):
@@ -369,6 +355,7 @@ class CognitiveSupervisor:
             vital_stats=vital_stats,
             timestamp=time.time(),
             raw_response=parsed,
+            valid=True,
         )
 
 

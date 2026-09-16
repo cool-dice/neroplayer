@@ -60,18 +60,21 @@ def test_parse_vlm_json_invalid():
 
 
 def test_cognitive_supervisor_init_and_properties():
-    cfg = HUDConfig(vlm_sentinel_interval=1.5, auto_menu_nav=True, guidance_enabled=True)
+    cfg = HUDConfig(vlm_sentinel_interval=1.5)
     supervisor = CognitiveSupervisor(cfg)
 
     assert supervisor.interval == 1.5
-    assert supervisor.auto_menu_nav is True
-    assert supervisor.guidance_enabled is True
+    assert CognitiveSupervisor(cfg, interval=0.25).interval == 0.25
     assert supervisor.is_running is False
+    assert supervisor.query_count == 0
+    assert supervisor.failure_count == 0
 
     cstate = supervisor.current_state
     assert isinstance(cstate, CognitiveState)
     assert cstate.state == "gameplay"
     assert cstate.is_game_over is False
+    assert cstate.valid is False
+    assert cstate.is_fresh(1e9) is False
     assert supervisor.is_game_over is False
     assert supervisor.suggested_action is None
     assert supervisor.description == ""
@@ -269,3 +272,148 @@ def test_cognitive_supervisor_dynamic_hud_and_vital_stats(monkeypatch):
     # Test update_dynamic_hud method
     supervisor.update_dynamic_hud({"score": [30, 25, 110, 35]})
     assert supervisor.dynamic_hud_layout["score"] == [30, 25, 110, 35]
+
+
+class _ScriptedEndpoint:
+    """Mock ``urllib.request.urlopen`` returning Ollama-style bodies and counting calls."""
+
+    def __init__(self, body: dict | None = None, *, fail: bool = False):
+        self.body = body or {"state": "gameplay", "game_over": False, "confidence": 0.9}
+        self.fail = fail
+        self.calls = 0
+
+    def __call__(self, req, timeout=None):
+        self.calls += 1
+        if self.fail:
+            raise OSError("endpoint down")
+        payload = json.dumps({"response": json.dumps(self.body)}).encode("utf-8")
+
+        class _Resp:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return False
+
+            def read(self_inner):
+                return payload
+
+        return _Resp()
+
+
+def _wait_until(predicate, timeout: float = 2.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_sentinel_honours_polling_interval(monkeypatch):
+    endpoint = _ScriptedEndpoint()
+    monkeypatch.setattr("urllib.request.urlopen", endpoint)
+    supervisor = CognitiveSupervisor(HUDConfig(use_vlm=True), interval=0.5)
+    supervisor.update_frame(np.zeros((64, 64, 3), dtype=np.uint8))
+    supervisor.start()
+    try:
+        assert _wait_until(lambda: supervisor.query_count >= 1)
+        # Keep publishing frames: new frames must not trigger extra queries inside the interval.
+        deadline = time.time() + 1.2
+        while time.time() < deadline:
+            supervisor.update_frame(np.zeros((64, 64, 3), dtype=np.uint8))
+            time.sleep(0.02)
+    finally:
+        supervisor.stop(timeout=1.0)
+    assert 1 <= endpoint.calls <= 3, endpoint.calls
+
+
+def test_sentinel_waits_for_a_frame_instead_of_querying():
+    supervisor = CognitiveSupervisor(HUDConfig(use_vlm=True), interval=0.01)
+    endpoint = _ScriptedEndpoint()
+    import urllib.request
+
+    original = urllib.request.urlopen
+    urllib.request.urlopen = endpoint
+    try:
+        supervisor.start()
+        time.sleep(0.2)
+        assert endpoint.calls == 0
+        supervisor.update_frame(np.zeros((32, 32, 3), dtype=np.uint8))
+        assert _wait_until(lambda: endpoint.calls >= 1)
+    finally:
+        supervisor.stop(timeout=1.0)
+        urllib.request.urlopen = original
+
+
+def test_sentinel_rescales_hud_layout_to_full_frame(monkeypatch):
+    endpoint = _ScriptedEndpoint(
+        {
+            "state": "gameplay",
+            "game_over": False,
+            "confidence": 0.9,
+            "hud_layout": {"score": [10, 10, 100, 30], "game_over": [50, 80, 200, 60]},
+        }
+    )
+    monkeypatch.setattr("urllib.request.urlopen", endpoint)
+    supervisor = CognitiveSupervisor(HUDConfig(use_vlm=True, vlm_max_image_dim=640), interval=0.01)
+    supervisor.update_frame(np.zeros((720, 1280, 3), dtype=np.uint8))
+    supervisor.start()
+    try:
+        assert _wait_until(lambda: bool(supervisor.current_state.hud_layout))
+    finally:
+        supervisor.stop(timeout=1.0)
+    assert supervisor.current_state.hud_layout == {
+        "score": [20, 20, 200, 60],
+        "game_over": [100, 160, 400, 120],
+    }
+    assert supervisor.dynamic_hud_layout["score"] == [20, 20, 200, 60]
+
+
+def test_sentinel_state_validity_confidence_default_and_reset(monkeypatch):
+    endpoint = _ScriptedEndpoint({"state": "defeat", "game_over": "yes"})  # no confidence field
+    monkeypatch.setattr("urllib.request.urlopen", endpoint)
+    supervisor = CognitiveSupervisor(HUDConfig(use_vlm=True), interval=0.01)
+    supervisor.update_frame(np.zeros((32, 32, 3), dtype=np.uint8))
+    supervisor.start()
+    try:
+        assert _wait_until(lambda: supervisor.current_state.valid)
+    finally:
+        supervisor.stop(timeout=1.0)
+
+    st = supervisor.current_state
+    assert st.valid is True
+    assert st.is_fresh(6.0) is True
+    assert st.confidence == 0.0
+    # "defeat" is not a canonical state label, but the flag still signals game over.
+    assert st.state == "gameplay"
+    assert st.is_game_over is True
+    assert st.signals_game_over is True
+    assert CognitiveState(state="defeat").signals_game_over is True
+    assert CognitiveState(state="gameplay").signals_game_over is False
+
+    supervisor.reset()
+    after = supervisor.current_state
+    assert after.valid is False
+    assert after.is_fresh(6.0) is False
+    assert after.is_game_over is False
+    assert supervisor.is_game_over is False
+
+
+def test_sentinel_survives_endpoint_failures_and_recovers(monkeypatch):
+    endpoint = _ScriptedEndpoint(fail=True)
+    monkeypatch.setattr("urllib.request.urlopen", endpoint)
+    supervisor = CognitiveSupervisor(HUDConfig(use_vlm=True), interval=0.01)
+    supervisor.update_frame(np.zeros((32, 32, 3), dtype=np.uint8))
+    supervisor.start()
+    try:
+        assert _wait_until(lambda: supervisor.failure_count >= 1)
+        assert supervisor.is_running is True
+        assert supervisor.current_state.valid is False
+
+        endpoint.fail = False
+        assert _wait_until(lambda: supervisor.query_count >= 1, timeout=3.0)
+    finally:
+        supervisor.stop(timeout=1.0)
+    assert supervisor.failure_count == 0
+    assert supervisor.current_state.valid is True

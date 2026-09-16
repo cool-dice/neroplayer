@@ -25,11 +25,7 @@ death rather than farm the drip next to a hazard.
 
 from __future__ import annotations
 
-import base64
-import json
 import re
-import urllib.error
-import urllib.request
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,11 +36,29 @@ import numpy as np
 
 from .config import HUDConfig, Region, RewardConfig
 from .perception import BGRFrame, crop_region
+from .vlm_client import query_vlm, rescale_boxes
 
 if TYPE_CHECKING:
-    from .cognitive import CognitiveSupervisor
+    from .cognitive import CognitiveState, CognitiveSupervisor
 
 _DIGITS = re.compile(r"\d+")
+
+
+def _verdict_is_fresh(supervisor: CognitiveSupervisor, cstate: CognitiveState) -> bool:
+    """True when ``cstate`` is a real (non-placeholder) verdict no older than ``vlm_max_age``."""
+    return cstate.is_fresh(supervisor.config.vlm_max_age)
+
+
+def _fresh_supervisor_state(supervisor: CognitiveSupervisor | None) -> CognitiveState | None:
+    """Return the sentinel's current verdict, or ``None`` if there is none worth acting on.
+
+    A stale verdict describes a frame from several seconds ago; letting it end
+    the episode would terminate on the *next* round's opening frames.
+    """
+    if supervisor is None:
+        return None
+    cstate = supervisor.current_state
+    return cstate if _verdict_is_fresh(supervisor, cstate) else None
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +173,7 @@ class AutonomousGameOverDetector:
         self._reward = reward
         self._supervisor = supervisor
         self._keywords = [k.upper().strip() for k in reward.game_over_keywords if k.strip()]
+        self._edge_keywords = self._build_edge_keywords()
         self._threshold = reward.game_over_threshold
         self._target_color = np.asarray(reward.game_over_color_bgr, dtype=np.int16)
 
@@ -185,6 +200,25 @@ class AutonomousGameOverDetector:
 
         # Previous frame for fade/blackout stationarity
         self._last_center_gray: np.ndarray | None = None
+
+    _EDGE_BANNERS = ("GAME OVER", "CONTINUE", "RETRY", "YOU DIED", "DEFEAT")
+    _COUNTDOWN_BANNERS = ("CONTINUE", "RETRY")
+
+    def _build_edge_keywords(self) -> list[str]:
+        """Banner strings rendered as synthetic edge templates.
+
+        Only the user's own keywords are used: a game that never shows
+        "CONTINUE" should not be matched against it. Countdown variants
+        ("CONTINUE 9", "CONTINUE?") are derived for the banners that commonly
+        carry one.
+        """
+        keywords = [kw for kw in self._keywords if kw in self._EDGE_BANNERS]
+        if not keywords and self._keywords:
+            keywords = self._keywords[:3]
+        for kw in self._COUNTDOWN_BANNERS:
+            if kw in self._keywords:
+                keywords.extend([f"{kw} 9", f"{kw}?"])
+        return keywords
 
     def reset(self) -> None:
         """Reset stateful frame history."""
@@ -273,17 +307,7 @@ class AutonomousGameOverDetector:
         best_score = 0.0
         best_match = ""
 
-        test_keywords = [
-            kw for kw in self._keywords if kw in ("GAME OVER", "CONTINUE", "RETRY", "YOU DIED", "DEFEAT")
-        ]
-        if not test_keywords and self._keywords:
-            test_keywords = self._keywords[:3]
-        if "CONTINUE" not in test_keywords:
-            test_keywords.append("CONTINUE")
-        # Also include common countdown test strings
-        test_keywords.extend(["CONTINUE 9", "RETRY 9", "CONTINUE?"])
-
-        for kw in test_keywords:
+        for kw in self._edge_keywords:
             (base_w, _), _ = cv2.getTextSize(kw, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
             if base_w <= 0:
                 continue
@@ -383,15 +407,12 @@ class AutonomousGameOverDetector:
         dim_conf = self._dimming_detect(roi)
         confidences.append(dim_conf)
 
-        # 6. Cognitive supervisor (VLM sentinel) state
-        if self._supervisor is not None:
-            cstate = self._supervisor.current_state
-            if (cstate.is_game_over or cstate.state in ("game_over", "defeat")) and cstate.confidence >= 0.7:
-                return True, 1.0
-            if cstate.is_game_over or cstate.state in ("game_over", "defeat"):
-                # High confidence from cognitive VLM supervisor
-                vlm_conf = max(0.85, cstate.confidence)
-                confidences.append(vlm_conf)
+        # 6. Cognitive supervisor (VLM sentinel) state, only while its verdict is fresh
+        cstate = _fresh_supervisor_state(self._supervisor)
+        if cstate is not None and cstate.signals_game_over:
+            if cstate.confidence >= self._supervisor.config.vlm_game_over_confidence:
+                return True, max(cstate.confidence, 0.95)
+            confidences.append(cstate.confidence)
 
         final_conf = max(confidences) if confidences else 0.0
         return final_conf >= self._threshold, final_conf
@@ -609,14 +630,14 @@ class VLMObserverInterface:
             return None
 
         h, w = frame.shape[:2]
-        # Encode frame as JPEG base64
-        success, buffer = cv2.imencode(".jpg", frame)
-        if not success:
-            return None
-        b64_image = base64.b64encode(buffer).decode("utf-8")
+        max_dim = self.config.vlm_max_image_dim
+        # The model must be told the size of the image it actually receives,
+        # which is the downscaled one; mirror ``encode_frame_jpeg``'s rule.
+        scale = float(max_dim) / float(max(h, w)) if max_dim > 0 and max(h, w) > max_dim else 1.0
+        sent_w, sent_h = max(1, int(w * scale)), max(1, int(h * scale))
 
         prompt = (
-            f"You are analyzing a video game frame of resolution {w}x{h}. "
+            f"You are analyzing a video game frame of resolution {sent_w}x{sent_h}. "
             "Identify the pixel bounding box for the following HUD elements if present: "
             "1. score (number counting points/score) "
             "2. lives (remaining lives or health bar) "
@@ -624,87 +645,24 @@ class VLMObserverInterface:
             'Return ONLY valid JSON: {"score": [x,y,w,h], "lives": [x,y,w,h], "game_over": [x,y,w,h]}'
         )
 
-        # Format payload depending on endpoint (OpenAI chat completions vs Ollama generate)
-        is_openai = "chat/completions" in self.config.vlm_endpoint or "/v1/" in self.config.vlm_endpoint
-        if is_openai:
-            payload_dict = {
-                "model": self.config.vlm_model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"},
-                            },
-                        ],
-                    }
-                ],
-                "stream": False,
-                "temperature": 0.1,
-            }
-        else:
-            payload_dict = {
-                "model": self.config.vlm_model,
-                "prompt": prompt,
-                "images": [b64_image],
-                "stream": False,
-                "format": "json",
-            }
-
         try:
-            payload = json.dumps(payload_dict).encode("utf-8")
-
-            req = urllib.request.Request(
-                self.config.vlm_endpoint,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=self.config.vlm_timeout) as response:
-                res_data = json.loads(response.read().decode("utf-8"))
-
-            content = ""
-            if "choices" in res_data and len(res_data["choices"]) > 0:
-                choice = res_data["choices"][0]
-                content = choice.get("message", {}).get("content", "")
-            elif "response" in res_data:
-                content = res_data["response"]
-            elif "content" in res_data:
-                content = res_data["content"]
-
-            # Handle possible markdown formatting (e.g. ```json ... ```)
-            if isinstance(content, str):
-                cleaned = content.strip()
-                if cleaned.startswith("```"):
-                    lines = cleaned.splitlines()
-                    if lines[0].startswith("```"):
-                        lines = lines[1:]
-                    if lines and lines[-1].startswith("```"):
-                        lines = lines[:-1]
-                    cleaned = "\n".join(lines).strip()
-                # Find first '{' and last '}'
-                start_brace = cleaned.find("{")
-                end_brace = cleaned.rfind("}")
-                if start_brace != -1 and end_brace != -1 and end_brace > start_brace:
-                    cleaned = cleaned[start_brace : end_brace + 1]
-                parsed = json.loads(cleaned)
-            else:
-                parsed = content
-
-            score_box = parsed.get("score")
-            lives_box = parsed.get("lives")
-            go_box = parsed.get("game_over")
+            parsed, scale = query_vlm(self.config, frame, prompt, max_dim=max_dim)
+            boxes = {
+                key: list(parsed[key])
+                for key in ("score", "lives", "game_over")
+                if isinstance(parsed.get(key), (list, tuple)) and len(parsed[key]) == 4
+            }
+            boxes = rescale_boxes(boxes, scale)
 
             def make_reg(box: list[int] | None) -> Region | None:
-                if box and len(box) == 4 and box[2] > 0 and box[3] > 0:
+                if box and box[2] > 0 and box[3] > 0:
                     return Region(left=int(box[0]), top=int(box[1]), width=int(box[2]), height=int(box[3]))
                 return None
 
             return DetectedHUDRegions(
-                score_region=make_reg(score_box),
-                lives_region=make_reg(lives_box),
-                game_over_region=make_reg(go_box),
+                score_region=make_reg(boxes.get("score")),
+                lives_region=make_reg(boxes.get("lives")),
+                game_over_region=make_reg(boxes.get("game_over")),
                 confidence=0.85,
                 method="vlm",
             )
@@ -853,6 +811,7 @@ class GameObserver:
             AutonomousHUDDetector(hud_config) if hud_config and hud_config.auto_detect else None
         )
         self._detected_hud: DetectedHUDRegions | None = None
+        self._applied_hud_boxes: dict[str, list[int]] = {}
         self._game_over = game_over_detector or build_game_over_detector(reward, supervisor=supervisor)
         self._score = score_signal or build_score_signal(reward)
         self._streak = 0
@@ -871,42 +830,56 @@ class GameObserver:
     def detected_hud(self) -> DetectedHUDRegions | None:
         return self._detected_hud
 
-    def update_dynamic_hud(self, regions: dict[str, list[int]]) -> None:
-        """Dynamically update score/game-over regions and detectors from dynamic HUD boxes."""
+    @staticmethod
+    def _valid_box(box: Any) -> list[int] | None:
+        if isinstance(box, (list, tuple)) and len(box) == 4 and box[2] > 0 and box[3] > 0:
+            return [int(v) for v in box]
+        return None
+
+    def update_dynamic_hud(self, regions: dict[str, list[int]]) -> bool:
+        """Adopt score/game-over boxes from the VLM sentinel.
+
+        The environment calls this every step with whatever the sentinel last
+        reported, so it must be idempotent: detectors are only rebuilt (and the
+        supervisor only notified) when a box actually changes. Returns True if
+        anything was updated.
+        """
         if not regions:
-            return
+            return False
 
-        # Update supervisor if attached
-        if self._supervisor is not None:
-            self._supervisor.update_dynamic_hud(regions)
-
-        # Update score region if valid
-        score_box = regions.get("score")
-        if score_box and len(score_box) == 4 and score_box[2] > 0 and score_box[3] > 0:
-            self._reward.score_region = Region(
-                left=int(score_box[0]),
-                top=int(score_box[1]),
-                width=int(score_box[2]),
-                height=int(score_box[3]),
-            )
+        changed = False
+        score_box = self._valid_box(regions.get("score"))
+        if score_box is not None and score_box != self._applied_hud_boxes.get("score"):
+            self._applied_hud_boxes["score"] = score_box
+            self._reward.score_region = Region(*score_box)
             self._score = build_score_signal(self._reward)
+            changed = True
 
-        # Update game_over region if valid and template not explicitly configured
-        go_box = regions.get("game_over")
+        go_box = self._valid_box(regions.get("game_over"))
         if (
-            go_box
-            and len(go_box) == 4
-            and go_box[2] > 0
-            and go_box[3] > 0
+            go_box is not None
             and not self._reward.game_over_template
+            and go_box != self._applied_hud_boxes.get("game_over")
         ):
-            self._reward.game_over_region = Region(
-                left=int(go_box[0]),
-                top=int(go_box[1]),
-                width=int(go_box[2]),
-                height=int(go_box[3]),
-            )
+            self._applied_hud_boxes["game_over"] = go_box
+            self._reward.game_over_region = Region(*go_box)
             self._game_over = build_game_over_detector(self._reward, supervisor=self._supervisor)
+            changed = True
+
+        if changed and self._supervisor is not None:
+            self._supervisor.update_dynamic_hud(regions)
+        return changed
+
+    def _supervisor_telemetry(self) -> dict[str, Any]:
+        if self._supervisor is None:
+            return {}
+        cstate = self._supervisor.current_state
+        return {
+            "vlm_state": cstate.state,
+            "vlm_is_game_over": 1.0 if cstate.is_game_over else 0.0,
+            "vlm_conf": cstate.confidence,
+            "vlm_fresh": 1.0 if cstate.is_fresh(self._supervisor.config.vlm_max_age) else 0.0,
+        }
 
     def auto_configure_hud(self, frame: BGRFrame) -> DetectedHUDRegions | None:
         """Autonomously detect and populate HUD regions if not explicitly pinned."""
@@ -949,12 +922,18 @@ class GameObserver:
         self._streak = self._streak + 1 if detected else 0
         terminated = self._streak >= max(1, self._reward.detection_patience)
 
-        # Instant VLM game-over: if sentinel confirms game over, bypass detection patience
-        if not terminated and self._supervisor is not None:
-            cstate = self._supervisor.current_state
-            if (cstate.is_game_over or cstate.state in ("game_over", "defeat")) and cstate.confidence >= 0.75:
-                terminated = True
-                confidence = max(confidence, cstate.confidence)
+        # A fresh, confident sentinel verdict ends the episode without waiting
+        # out detection_patience; stale or placeholder verdicts are ignored.
+        vlm_info = self._supervisor_telemetry()
+        fresh = _fresh_supervisor_state(self._supervisor)
+        if (
+            not terminated
+            and fresh is not None
+            and fresh.signals_game_over
+            and fresh.confidence >= self._supervisor.config.vlm_game_over_confidence
+        ):
+            terminated = True
+            confidence = max(confidence, fresh.confidence)
 
         frame_diff = self._compute_frame_diff(frame)
         is_idle = frame_diff < self._reward.idle_diff_threshold
@@ -962,14 +941,6 @@ class GameObserver:
         if terminated:
             # No score reward on the terminal frame: the game-over overlay
             # usually covers the HUD and would produce a spurious reading.
-            vlm_info: dict[str, Any] = {}
-            if self._supervisor is not None:
-                cstate = self._supervisor.current_state
-                vlm_info = {
-                    "vlm_state": cstate.state,
-                    "vlm_is_game_over": 1.0 if cstate.is_game_over else 0.0,
-                    "vlm_conf": cstate.confidence,
-                }
             return FrameVerdict(
                 reward=self._reward.game_over_penalty,
                 terminated=True,
@@ -995,15 +966,6 @@ class GameObserver:
             reward += self._reward.idle_penalty
         else:
             reward += self._reward.movement_reward
-
-        vlm_info: dict[str, Any] = {}
-        if self._supervisor is not None:
-            cstate = self._supervisor.current_state
-            vlm_info = {
-                "vlm_state": cstate.state,
-                "vlm_is_game_over": 1.0 if cstate.is_game_over else 0.0,
-                "vlm_conf": cstate.confidence,
-            }
 
         return FrameVerdict(
             reward=float(reward),

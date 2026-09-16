@@ -52,10 +52,13 @@ def test_config_survives_a_json_round_trip(tmp_path):
     assert restored.tracker.enabled is False
     assert restored.hud.auto_detect is False
     assert restored.hud.vlm_sentinel_interval == 2.0
-    assert restored.hud.auto_menu_nav is True
-    assert restored.hud.guidance_enabled is True
+    assert restored.hud.vlm_max_age == 6.0
+    assert restored.hud.vlm_game_over_confidence == 0.75
+    assert restored.hud.auto_menu_nav is False
+    assert restored.hud.menu_nav_cooldown == 1.5
     assert restored.hud.cognitive_obs is False
     assert restored.hud.cognitive_dim == 8
+    assert restored.hud.cognitive_max_lives == 5.0
 
 
 def test_vision_config_rgb_and_shapes():

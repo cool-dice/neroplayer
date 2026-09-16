@@ -308,13 +308,26 @@ class HUDConfig:
     vlm_endpoint: str = "http://localhost:11434/api/generate"  # Ollama / OpenAI-compatible
     vlm_model: str = "qwen2.5-vl"
     vlm_timeout: float = 3.0
+    # Longest image side (px) sent to the VLM; larger frames are downscaled and
+    # any boxes the model returns are mapped back to full resolution.
+    vlm_max_image_dim: int = 640
     # Asynchronous VLM Sentinel & Cognitive Game Supervisor
     vlm_sentinel_interval: float = 2.0
-    auto_menu_nav: bool = True
-    guidance_enabled: bool = True
+    # A sentinel verdict older than this (seconds) is ignored for terminal
+    # decisions such as game-over short-circuits and menu navigation.
+    vlm_max_age: float = 6.0
+    # Minimum sentinel confidence for a game-over verdict to end the episode
+    # without waiting for ``reward.detection_patience``.
+    vlm_game_over_confidence: float = 0.75
+    # Menu navigation injects input on its own; opt in explicitly.
+    auto_menu_nav: bool = False
+    # Minimum seconds between automatic restart taps triggered by a menu verdict.
+    menu_nav_cooldown: float = 1.5
     # Semantic Cognitive Observation Space for RL
     cognitive_obs: bool = False
     cognitive_dim: int = 8
+    # ``lives`` from the VLM is normalised against this for the cognitive vector.
+    cognitive_max_lives: float = 5.0
 
 
 @dataclass
