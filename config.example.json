@@ -135,10 +135,14 @@
     "vlm_endpoint": "http://localhost:11434/api/generate",
     "vlm_model": "qwen2.5-vl",
     "vlm_timeout": 3.0,
+    "vlm_max_image_dim": 640,
     "vlm_sentinel_interval": 2.0,
-    "auto_menu_nav": true,
-    "guidance_enabled": true,
+    "vlm_max_age": 6.0,
+    "vlm_game_over_confidence": 0.75,
+    "auto_menu_nav": false,
+    "menu_nav_cooldown": 1.5,
     "cognitive_obs": false,
-    "cognitive_dim": 8
+    "cognitive_dim": 8,
+    "cognitive_max_lives": 5.0
   }
 }

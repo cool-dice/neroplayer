@@ -47,6 +47,24 @@ class CognitiveState:
     vital_stats: dict[str, float] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
     raw_response: dict[str, Any] = field(default_factory=dict)
+    # False for the placeholder state held before the first successful VLM
+    # query (and after ``CognitiveSupervisor.reset``); such states are never
+    # "fresh" regardless of their timestamp.
+    valid: bool = False
+
+    @property
+    def age(self) -> float:
+        """Seconds elapsed since this verdict was produced."""
+        return max(0.0, time.time() - self.timestamp)
+
+    def is_fresh(self, max_age: float) -> bool:
+        """True if this is a real VLM verdict no older than ``max_age`` seconds."""
+        return self.valid and self.age <= max_age
+
+    @property
+    def signals_game_over(self) -> bool:
+        """True if the model reported game over via either the flag or the state label."""
+        return self.is_game_over or self.state in ("game_over", "defeat")
 
 
 def parse_vlm_json(content: str | dict[str, Any]) -> dict[str, Any]:
@@ -189,6 +207,18 @@ class CognitiveSupervisor:
         if self._worker_thread is not None:
             self._worker_thread.join(timeout=timeout)
             self._worker_thread = None
+
+    def reset(self) -> None:
+        """Forget the last verdict and frame at an episode boundary.
+
+        Without this the terminal game-over screenshot would be re-queried (and
+        re-confirmed) for the whole of the next ``reset()``, stalling it until
+        ``env.reset_timeout`` and terminating the next episode on its first step.
+        The worker thread keeps running; it simply waits for the next frame.
+        """
+        with self._lock:
+            self._current_state = CognitiveState()
+            self._latest_frame = None
 
     def update_frame(self, frame: BGRFrame | None) -> None:
         """Pass the latest gameplay frame to the sentinel (non-blocking)."""
