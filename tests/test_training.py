@@ -8,6 +8,7 @@ multi-modal extractor.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -196,16 +197,69 @@ def test_build_config_cognitive_obs_flags():
     assert cfg_no.hud.cognitive_obs is False
 
 
-def test_build_config_infinite_flag():
+def test_build_config_infinite_flag_keeps_round_length():
     args = train_script.parse_args(["--infinite"])
     cfg = train_script.build_config(args)
-    assert cfg.train.total_timesteps >= 1_000_000_000
+    assert args.infinite is True
+    assert cfg.train.total_timesteps == train_script.AppConfig().train.total_timesteps
 
-    args_zero = train_script.parse_args(["--timesteps", "0"])
-    cfg_zero = train_script.build_config(args_zero)
-    assert cfg_zero.train.total_timesteps >= 1_000_000_000
+    args = train_script.parse_args(["--infinite", "--timesteps", "500"])
+    assert train_script.build_config(args).train.total_timesteps == 500
 
 
+@pytest.mark.parametrize("value", ["0", "-5"])
+def test_non_positive_timesteps_are_rejected(value):
+    with pytest.raises(SystemExit):
+        train_script.parse_args(["--timesteps", value])
+
+
+class _FakeModel:
+    def __init__(self, interrupt_on_call: int | None = None):
+        self.calls: list[tuple[int, bool]] = []
+        self.num_timesteps = 0
+        self._interrupt_on_call = interrupt_on_call
+
+    def learn(self, *, total_timesteps, callback, reset_num_timesteps, tb_log_name, progress_bar):
+        if self._interrupt_on_call is not None and len(self.calls) + 1 == self._interrupt_on_call:
+            raise KeyboardInterrupt
+        self.calls.append((total_timesteps, reset_num_timesteps))
+        self.num_timesteps += total_timesteps
+
+
+def _run(monkeypatch, tmp_path, argv, model):
+    saved: list[str] = []
+    monkeypatch.setattr(train_script, "save_run", lambda _m, _env, path: saved.append(path.name))
+    args = train_script.parse_args(argv)
+    config = train_script.build_config(args)
+    status = train_script.run_training(model, object(), config, args, tmp_path, "run", [])
+    return status, saved
+
+
+def test_run_training_infinite_rounds_preserve_schedules(monkeypatch, tmp_path):
+    model = _FakeModel(interrupt_on_call=3)
+    status, saved = _run(monkeypatch, tmp_path, ["--infinite", "--timesteps", "100"], model)
+
+    assert status == 130
+    assert model.calls == [(100, True), (100, False)]
+    assert saved == ["round_0001", "round_0002", "interrupted"]
+
+
+def test_run_training_infinite_with_resume_never_resets_counter(monkeypatch, tmp_path):
+    model = _FakeModel(interrupt_on_call=2)
+    status, _saved = _run(
+        monkeypatch, tmp_path, ["--infinite", "--timesteps", "50", "--resume", "x.zip"], model
+    )
+    assert status == 130
+    assert model.calls == [(50, False)]
+
+
+def test_run_training_single_round(monkeypatch, tmp_path):
+    model = _FakeModel()
+    status, saved = _run(monkeypatch, tmp_path, ["--timesteps", "250"], model)
+
+    assert status == 0
+    assert model.calls == [(250, True)]
+    assert saved == ["final"]
 
 
 def test_console_stats_callback(capsys):
