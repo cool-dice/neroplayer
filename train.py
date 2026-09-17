@@ -44,12 +44,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--timesteps",
         type=int,
         default=None,
-        help="Total environment steps to train for (0 or negative for infinite)",
+        help="Environment steps to train for (must be positive); with --infinite, the length of one round",
     )
     parser.add_argument(
         "--infinite",
         action="store_true",
-        help="Train indefinitely until manually stopped with Ctrl+C",
+        help=(
+            "Train in repeated rounds of --timesteps until Ctrl+C; "
+            "per-round schedules (epsilon, LR) stay intact"
+        ),
     )
     parser.add_argument("--run-name", default=None, help="Name for the models/ and logs/ subfolders")
     parser.add_argument("--resume", type=Path, default=None, help="Path to a .zip model to continue training")
@@ -114,7 +117,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--countdown",
         type=int,
         default=0,
-        help="Seconds to wait before starting, so you can focus the game window",
+        help="Seconds to wait before starting (optional; follow-foreground locks onto the focused game)",
     )
     parser.add_argument(
         "--game-over-mode",
@@ -185,7 +188,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Disable semantic cognitive observation vector",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--follow-foreground",
+        action="store_true",
+        default=None,
+        help="Follow the focused game window so you can alt-tab between titles (default on)",
+    )
+    parser.add_argument(
+        "--no-follow-foreground",
+        action="store_true",
+        help="Capture the saved desktop rectangle only; do not retarget on alt-tab",
+    )
+    parser.add_argument(
+        "--window-title",
+        default=None,
+        help="Only capture windows whose title contains this substring (or matches ^regex$)",
+    )
+    args = parser.parse_args(argv)
+    if args.timesteps is not None and args.timesteps <= 0:
+        parser.error(f"--timesteps must be a positive integer, got {args.timesteps}")
+    return args
 
 
 def build_config(args: argparse.Namespace) -> AppConfig:
@@ -193,10 +215,7 @@ def build_config(args: argparse.Namespace) -> AppConfig:
     config = load_config(args.config)
     if args.algo:
         config.train.algo = args.algo
-    if args.infinite or (args.timesteps is not None and args.timesteps <= 0):
-        # 100 billion steps is effectively infinite (>50 years at 60 FPS)
-        config.train.total_timesteps = 100_000_000_000
-    elif args.timesteps is not None:
+    if args.timesteps is not None:
         config.train.total_timesteps = args.timesteps
     if args.seed is not None:
         config.train.seed = args.seed
@@ -243,6 +262,12 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.hud.cognitive_obs = True
     if args.no_cognitive_obs:
         config.hud.cognitive_obs = False
+    if args.follow_foreground:
+        config.capture.follow_foreground = True
+    if args.no_follow_foreground:
+        config.capture.follow_foreground = False
+    if args.window_title is not None:
+        config.capture.window_title = args.window_title
     return config
 
 
@@ -438,6 +463,60 @@ def check_environment(config: AppConfig, *, mock: bool) -> int:
     return 0
 
 
+def run_training(
+    model,
+    vec_env: DummyVecEnv | VecNormalize,
+    config: AppConfig,
+    args: argparse.Namespace,
+    model_dir: Path,
+    run_name: str,
+    callbacks: list[BaseCallback],
+) -> int:
+    """Run ``model.learn`` once, or in rounds under ``--infinite``, and save the result.
+
+    Each round is a full ``total_timesteps`` learn call, so SB3's per-run
+    schedules (DQN epsilon decay, linear learning rates) complete inside every
+    round instead of being stretched over a fictitious horizon. Only the first
+    call resets the timestep counter, so logs and checkpoints keep counting up
+    across rounds. Returns the process exit status.
+    """
+    reset_num_timesteps = args.resume is None
+    try:
+        if not args.infinite:
+            model.learn(
+                total_timesteps=config.train.total_timesteps,
+                callback=callbacks,
+                reset_num_timesteps=reset_num_timesteps,
+                tb_log_name=run_name,
+                progress_bar=False,
+            )
+            save_run(model, vec_env, model_dir / "final")
+            print(f"Training finished. Saved {model_dir / 'final.zip'}")
+            return 0
+
+        print(
+            f"Infinite mode: training in rounds of {config.train.total_timesteps} steps "
+            "until Ctrl+C."
+        )
+        round_index = 0
+        while True:
+            round_index += 1
+            model.learn(
+                total_timesteps=config.train.total_timesteps,
+                callback=callbacks,
+                reset_num_timesteps=reset_num_timesteps,
+                tb_log_name=run_name,
+                progress_bar=False,
+            )
+            reset_num_timesteps = False
+            print(f"Round {round_index} finished ({model.num_timesteps} total steps)")
+            save_run(model, vec_env, model_dir / f"round_{round_index:04d}")
+    except KeyboardInterrupt:
+        save_run(model, vec_env, model_dir / "interrupted")
+        print(f"\nInterrupted. Saved {model_dir / 'interrupted.zip'}")
+        return 130
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     config = build_config(args)
@@ -502,24 +581,12 @@ def main(argv: list[str] | None = None) -> int:
     console_stats = ConsoleStatsCallback(check_freq=50)
 
     install_interrupt_handler()
-    status = 0
     try:
-        model.learn(
-            total_timesteps=config.train.total_timesteps,
-            callback=[checkpoint, console_stats],
-            reset_num_timesteps=args.resume is None,
-            tb_log_name=run_name,
-            progress_bar=False,
+        return run_training(
+            model, vec_env, config, args, model_dir, run_name, [checkpoint, console_stats]
         )
-        save_run(model, vec_env, model_dir / "final")
-        print(f"Training finished. Saved {model_dir / 'final.zip'}")
-    except KeyboardInterrupt:
-        save_run(model, vec_env, model_dir / "interrupted")
-        print(f"\nInterrupted. Saved {model_dir / 'interrupted.zip'}")
-        status = 130
     finally:
         vec_env.close()
-    return status
 
 
 if __name__ == "__main__":

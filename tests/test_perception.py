@@ -3,16 +3,18 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from ai_player.config import AudioConfig, Region, VisionConfig
+from ai_player.config import AudioConfig, CaptureConfig, Region, VisionConfig
 from ai_player.perception import (
     AudioFeatureExtractor,
     FrameProcessor,
     FrameStack,
     LoopbackAudioCapture,
+    ScreenCapture,
     SilentAudioCapture,
     build_audio_source,
     crop_region,
 )
+from ai_player.window_target import WindowLocator, WindowTarget
 
 
 def test_frame_processor_downscales_to_grayscale():
@@ -133,3 +135,53 @@ def test_crop_region_clamps_to_frame():
     patch = crop_region(frame, Region(left=40, top=40, width=100, height=100))
 
     assert patch.shape == (10, 20, 3)
+
+
+class _ArrayShot(np.ndarray):
+    """mss-like grab result: ndarray that still has the screenshot interface."""
+
+
+class _FakeSct:
+    def __init__(self) -> None:
+        self.grabs: list[dict[str, int]] = []
+
+    def grab(self, monitor: dict[str, int]) -> np.ndarray:
+        self.grabs.append(dict(monitor))
+        frame = np.zeros((monitor["height"], monitor["width"], 4), dtype=np.uint8)
+        return frame.view(_ArrayShot)
+
+    def close(self) -> None:
+        return None
+
+
+def test_screen_capture_follows_window_identity_not_geometry():
+    game_a = WindowTarget(title="A", handle=1, region=Region(0, 0, 320, 240))
+    game_a_moved = WindowTarget(title="A", handle=1, region=Region(40, 40, 320, 240))
+    game_b = WindowTarget(title="B", handle=2, region=Region(10, 10, 400, 300))
+    current = {"t": game_a}
+
+    class _Loc(WindowLocator):
+        def locate(self, config, previous=None):  # type: ignore[override]
+            return current["t"]
+
+    cfg = CaptureConfig(follow_foreground=True, poll_interval=0.0, min_width=10, min_height=10)
+    cap = ScreenCapture(cfg, locator=_Loc())
+    cap._sct = _FakeSct()
+    cap._ensure_handle = lambda: None  # type: ignore[method-assign]
+
+    frame = cap.grab()
+    assert frame.shape == (240, 320, 3)
+    assert cap.current_title == "A"
+    assert cap.consume_switch() is False  # first lock is not a switch
+
+    current["t"] = game_a_moved
+    cap.grab()
+    assert cap.current_region.left == 40
+    assert cap.consume_switch() is False  # same handle, just moved
+
+    current["t"] = game_b
+    cap.grab()
+    assert cap.current_title == "B"
+    assert cap.consume_switch() is True
+    assert cap.consume_switch() is False  # latched once
+    assert cap.grab().shape == (300, 400, 3)

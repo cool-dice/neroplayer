@@ -120,17 +120,24 @@ plumbing clearly produces a learning signal the policy can exploit.
 
 ## Pointing it at a real game
 
-1. Open the game in a window and leave it visible.
-2. Calibrate:
+Capture follows the focused game window by default. You do **not** have to
+re-draw a rectangle when you alt-tab to another title: the agent retargets,
+forgets the previous game's HUD/avatar, and starts a fresh episode. Clicking
+the telemetry overlay or a terminal is ignored (sticky lock). Pin a title with
+`--window-title Celeste` if you want to look away without losing the game.
+
+1. Open a game and leave it visible (windowed, not exclusive fullscreen).
+2. Optional calibrate — this now writes a follow-foreground config, not a
+   one-off crop:
 
    ```bash
    python calibrate.py --output config.json
+   python calibrate.py --output config.json --window-title "Celeste"
+   python calibrate.py --output config.json --static-region   # old 3-box crop
    ```
 
-   You drag three boxes — the game window, the score digits, and the area where
-   the game-over screen appears — and then let a countdown capture a game-over
-   template while the game sits on that screen. Everything is written to
-   `config.json`.
+   Score and game-over boxes are optional: cancel them and autonomous HUD
+   detection fills them in at train time.
 
 3. Check what the agent sees. This needs no GUI, so it also works over remote
    sessions and when you edited `config.json` by hand:
@@ -190,11 +197,21 @@ plumbing clearly produces a learning signal the policy can exploit.
    and confirm in the console that rewards jump when you score and that
    episodes end when you die. Fix the regions before training for real.
 
-6. Train, giving yourself time to focus the game window:
+6. Train. Focus whichever game you want to play; switch titles whenever you
+   like — each switch ends the episode and re-detects HUD/avatar:
 
    ```bash
-   python train.py --config config.json --timesteps 500000 --countdown 5 --render
+   python train.py --config config.json --timesteps 500000 --render
+   python train.py --config config.json --window-title "Celeste" --infinite --render
    ```
+
+   `--timesteps` must be positive. To train open-endedly, add `--infinite`:
+   training then runs in repeated rounds of `--timesteps` steps until Ctrl+C,
+   saving `round_NNNN.zip` after each round. Because every round is a full
+   `learn()` call, per-run schedules (DQN epsilon decay, linear learning
+   rates) complete inside each round instead of being stretched over a
+   fictitious horizon; the timestep counter and TensorBoard logs keep
+   counting up across rounds.
 
    The `--render` flag opens a real-time HUD dashboard featuring:
    - **Real Measured FPS** calculated from actual step intervals vs target FPS.
@@ -302,10 +319,12 @@ To support 3D FPS, RTS, and racing titles, `ControlConfig` supports both keyboar
 
 A dedicated non-blocking background daemon thread (`CognitiveSupervisor` / `AsyncVLMSentinel` in `ai_player/cognitive.py`) continuously monitors live gameplay with Vision-Language Models:
 - **Hierarchical Game State Recognition**: Identifies `"gameplay"`, `"game_over"`, `"menu"`, `"cutscene"`, `"loading"`.
-- **Autonomous Menu Navigation (`auto_menu_nav`)**: Automatically taps start/restart keys when a menu or title screen is identified, navigating the agent directly into playable gameplay.
-- **Continuous Game-Over Guidance**: Evaluates ongoing game state in the background and fuses VLM confidence into `AutonomousGameOverDetector` and `GameObserver`.
-- **Tactical Guidance & Commentary**: Supplies action suggestions (`suggested_action`, e.g. `"press_start"`, `"dodge_left"`) and scene descriptions (`vlm_desc`), rendered directly onto the real-time HUD telemetry overlay.
-- **Zero FPS Overhead**: Decoupled asynchronous polling never slows down or blocks the 30-60 FPS gameplay decision loop.
+- **Autonomous Menu Navigation (`auto_menu_nav`, default `false`)**: When enabled, taps the restart keys once per fresh `"menu"` verdict, rate-limited by `menu_nav_cooldown` (1.5 s). It injects input on its own, so it is opt-in.
+- **Continuous Game-Over Guidance**: Fuses the VLM verdict into `AutonomousGameOverDetector` and `GameObserver`. A verdict of `game_over` with confidence ≥ `vlm_game_over_confidence` (0.75) ends the episode immediately, bypassing `detection_patience`; lower-confidence verdicts join the normal debounced detector pool. Only verdicts newer than `vlm_max_age` (6 s) count, and the verdict is cleared at every `reset()` so the terminal screenshot can never end the *next* episode.
+- **Dynamic HUD Adaptation**: Frames are downscaled to `vlm_max_image_dim` (640 px) before upload; any `hud_layout` boxes the model returns are mapped back to full-frame coordinates and only re-applied to the score/game-over detectors when they actually change.
+- **Tactical Guidance & Commentary**: Supplies action suggestions (`suggested_action`, e.g. `"press_start"`, `"dodge_left"`) and scene descriptions (`vlm_desc`), rendered onto the real-time HUD telemetry overlay (`[STALE]` when the last verdict is older than `vlm_max_age`).
+- **Semantic Cognitive Observation (`cognitive_obs`)**: Optional 8-float observation key `[state_code, hp_ratio, ammo_ratio, lives_ratio, danger_level, action_code, vlm_confidence, game_over]`; `lives` is normalised by `cognitive_max_lives` (5). Stale verdicts produce the neutral default vector.
+- **Bounded Overhead**: The sentinel runs on a daemon thread and starts at most one VLM query per `vlm_sentinel_interval` (2 s), backing off exponentially (up to 30 s) while the endpoint fails. The step loop only reads its latest verdict and never waits on it.
 
 ## Tuning that actually moves the needle
 

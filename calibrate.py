@@ -6,9 +6,11 @@ Run this on the machine the game runs on, with the game visible.
     python calibrate.py --check                 # verify an existing config
     python calibrate.py --live                  # watch the 84x84 agent view
 
-**Pick** (default) asks you to drag three rectangles (confirm each with Enter,
-cancel with c): the game window, the score digits, and the area where the
-game-over screen appears. It then offers to capture a game-over template.
+**Pick** (default) locks onto the foreground game window so you can alt-tab
+between titles later without repeating this step. Pass ``--static-region`` for
+the original three-rectangle flow (game / score / game-over). Score and
+game-over boxes are optional: cancel them and the autonomous HUD detector
+fills them in at train time.
 
 **Check** needs no GUI: it saves an annotated screenshot to
 ``assets/captures/calibration.png`` and prints what the observer currently
@@ -71,6 +73,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=None, help="Start from an existing config")
     parser.add_argument("--monitor", type=int, default=1, help="mss monitor index (1 = primary)")
     parser.add_argument(
+        "--static-region",
+        action="store_true",
+        help="Pin a desktop rectangle instead of following the live game window",
+    )
+    parser.add_argument(
+        "--window-title",
+        default="",
+        help="Only follow windows whose title contains this substring (or matches ^regex$)",
+    )
+    parser.add_argument(
+        "--follow-foreground",
+        action="store_true",
+        default=None,
+        help="Follow the focused game window (default for pick mode)",
+    )
+    parser.add_argument(
+        "--no-follow-foreground",
+        action="store_true",
+        help="Disable live window following; capture the saved rectangle only",
+    )
+    parser.add_argument(
         "--template-delay",
         type=int,
         default=10,
@@ -106,6 +129,14 @@ def grab(monitor: dict[str, int]) -> np.ndarray:
             "machine showing the game, in a normal desktop session."
         ) from exc
     return np.ascontiguousarray(np.asarray(raw, dtype=np.uint8)[:, :, :3])
+
+
+def grab_game(config: AppConfig) -> np.ndarray:
+    """Grab whatever the agent would see: live window when follow is on, else the saved region."""
+    from ai_player.perception import ScreenCapture
+
+    with ScreenCapture(config.capture) as cap:
+        return cap.grab()
 
 
 def select_region(image: np.ndarray, prompt: str) -> Region | None:
@@ -162,7 +193,7 @@ def run_check(args: argparse.Namespace, config: AppConfig) -> int:
     """Capture one frame and report exactly what the observer makes of it."""
     print(f"Capturing in {args.delay:.0f}s -- bring the game to the front...")
     time.sleep(args.delay)
-    frame = grab(config.capture.region.as_mss_monitor())
+    frame = grab_game(config)
 
     CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
     out_path = CAPTURES_DIR / "calibration.png"
@@ -178,7 +209,7 @@ def run_check(args: argparse.Namespace, config: AppConfig) -> int:
 
     # Check frame difference against a second frame 0.5s later
     time.sleep(0.5)
-    second_frame = grab(config.capture.region.as_mss_monitor())
+    second_frame = grab_game(config)
     gray1 = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gray2 = cv2.cvtColor(second_frame, cv2.COLOR_BGR2GRAY)
     motion_diff = float(cv2.absdiff(gray1, gray2).mean()) / 255.0
@@ -190,7 +221,7 @@ def run_check(args: argparse.Namespace, config: AppConfig) -> int:
     signal = build_score_signal(config.reward)
     signal.update(frame)  # first call only primes the baseline
     time.sleep(1.0)
-    points, score = signal.update(grab(config.capture.region.as_mss_monitor()))
+    points, score = signal.update(grab_game(config))
     print(f"Score reader          : {type(signal).__name__}")
     print(f"Score read            : {score if score is not None else 'n/a'}")
     print(f"Points in the last 1s : {points}")
@@ -203,7 +234,8 @@ def run_check(args: argparse.Namespace, config: AppConfig) -> int:
         print(f"  [{a['index']}] {a['formatted']:<18} -> {keys_str:<15} [{status}]")
 
     print(
-        "\nIf the boxes in the screenshot do not line up, re-run `python calibrate.py` and drag them again."
+        "\nIf the boxes do not line up, leave follow-foreground on and let auto-HUD "
+        "retarget them, or re-run `python calibrate.py --static-region`."
     )
     return 0
 
@@ -376,15 +408,18 @@ def run_live(config: AppConfig) -> int:
     processor = FrameProcessor(config.vision)
     period = 1.0 / config.env.target_fps if config.env.target_fps else 0.0
     print("Press q in the preview window to quit.")
+    from ai_player.perception import ScreenCapture
+
     try:
-        while True:
-            started = time.perf_counter()
-            small = processor.process(grab(config.capture.region.as_mss_monitor()))
-            preview = cv2.resize(small, (336, 336), interpolation=cv2.INTER_NEAREST)
-            cv2.imshow("agent view (84x84, upscaled)", preview)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-            time.sleep(max(0.0, period - (time.perf_counter() - started)))
+        with ScreenCapture(config.capture) as cap:
+            while True:
+                started = time.perf_counter()
+                small = processor.process(cap.grab())
+                preview = cv2.resize(small, (336, 336), interpolation=cv2.INTER_NEAREST)
+                cv2.imshow("agent view (84x84, upscaled)", preview)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+                time.sleep(max(0.0, period - (time.perf_counter() - started)))
     except cv2.error as exc:
         print(f"OpenCV could not open a preview window: {exc}")
         return 2
@@ -393,8 +428,77 @@ def run_live(config: AppConfig) -> int:
     return 0
 
 
+def apply_capture_flags(args: argparse.Namespace, config: AppConfig) -> None:
+    """Apply --follow-foreground / --window-title / --static-region to ``config``."""
+    if getattr(args, "window_title", ""):
+        config.capture.window_title = args.window_title
+    if getattr(args, "no_follow_foreground", False) or getattr(args, "static_region", False):
+        config.capture.follow_foreground = False
+    elif getattr(args, "follow_foreground", None) or getattr(args, "window_title", ""):
+        config.capture.follow_foreground = True
+
+
+def run_pick_follow(args: argparse.Namespace, config: AppConfig) -> int:
+    """Write a config that follows the live game window instead of a dragged box."""
+    from ai_player.window_target import WindowLocator
+
+    config.capture.follow_foreground = True
+    config.capture.monitor_index = args.monitor
+    locator = WindowLocator()
+    target = locator.locate(config.capture)
+    if target is not None:
+        config.capture.region = target.region
+        print(f"Following '{target.title}'  {target.region.width}x{target.region.height} at "
+              f"({target.region.left},{target.region.top})")
+        print("Alt-tab to another game during train/play and capture will retarget.")
+    else:
+        print(
+            "No eligible game window yet. follow_foreground is on: the agent will "
+            "lock onto whichever game you focus when training starts."
+        )
+        print(f"Fallback rectangle: {config.capture.region}")
+
+    print("\nOptional: drag HUD boxes on a live grab (cancel with c to skip; auto-HUD fills them in).")
+    try:
+        game_frame = grab_game(config)
+    except RuntimeError as exc:
+        print(exc)
+        saved = config.save(args.output)
+        print(f"\nWrote {saved} without a live grab.")
+        return 0
+    try:
+        score = select_region(game_frame, "Optional  Drag a tight box around the SCORE digits")
+    except cv2.error:
+        score = None
+    if score is not None:
+        config.reward.score_region = score
+    try:
+        game_over = select_region(game_frame, "Optional  Drag a box where GAME OVER appears")
+    except cv2.error:
+        game_over = None
+    if game_over is not None:
+        config.reward.game_over_region = game_over
+
+    saved = config.save(args.output)
+    print(f"\nWrote {saved}")
+    print(f"  follow_foreground: {config.capture.follow_foreground}")
+    print(f"  window_title     : {config.capture.window_title or '(any)'}")
+    print(f"  capture region   : {config.capture.region}  (fallback / last lock)")
+    print(f"  score region     : {config.reward.score_region}")
+    print(f"  game-over region : {config.reward.game_over_region}")
+    print("\nVerify what the agent sees:")
+    print(f"  python calibrate.py --config {saved} --check")
+    print("Then train; alt-tab between games whenever you like:")
+    print(f"  python train.py --config {saved} --timesteps 500000 --render")
+    return 0
+
+
 def run_pick(args: argparse.Namespace, config: AppConfig) -> int:
-    """Interactive three-rectangle flow, then an optional template capture."""
+    """Lock onto a live window (default) or pin a static desktop rectangle."""
+    apply_capture_flags(args, config)
+    if not args.static_region:
+        return run_pick_follow(args, config)
+
     monitor = resolve_monitor(args.monitor)
     if monitor is None:
         return 2
@@ -416,6 +520,7 @@ def run_pick(args: argparse.Namespace, config: AppConfig) -> int:
         print("Cancelled.")
         return 1
     # selectROI works in monitor-local coordinates; mss needs desktop-absolute.
+    config.capture.follow_foreground = False
     config.capture.monitor_index = args.monitor
     config.capture.region = Region(
         left=monitor["left"] + region.left,
@@ -454,7 +559,7 @@ def capture_template(args: argparse.Namespace, config: AppConfig) -> None:
         print(f"  {remaining}s ", end="\r", flush=True)
         time.sleep(1.0)
 
-    over_frame = grab(config.capture.region.as_mss_monitor())
+    over_frame = grab_game(config)
     patch = crop_region(over_frame, config.reward.game_over_region)
     if patch.size == 0:
         print("\nGame-over region is empty; skipping the template.")
@@ -475,7 +580,7 @@ def run_auto_hud(args: argparse.Namespace, config: AppConfig) -> int:
     """Run autonomous zero-shot HUD detection on game frame and save/display result."""
     print(f"Capturing game frame in {args.delay:.0f}s...")
     time.sleep(args.delay)
-    frame = grab(config.capture.region.as_mss_monitor())
+    frame = grab_game(config)
 
     detector = AutonomousHUDDetector(config.hud)
     detected = detector.detect_hud(frame)
@@ -521,9 +626,8 @@ def run_probe_avatar(args: argparse.Namespace, config: AppConfig) -> int:
         time.sleep(1.0)
 
     probe = ControllabilityProbe(config.tracker)
-    monitor = config.capture.region.as_mss_monitor()
 
-    frame0 = grab(monitor)
+    frame0 = grab_game(config)
     probe.record_probe_step("idle", frame0)
 
     try:
@@ -541,7 +645,7 @@ def run_probe_avatar(args: argparse.Namespace, config: AppConfig) -> int:
         print(f"  Probing action [{act_name}]...")
         controller.act(a_idx)
         time.sleep(0.06)
-        f = grab(monitor)
+        f = grab_game(config)
         probe.record_probe_step(act_name, f)
         time.sleep(0.04)
 
@@ -578,6 +682,7 @@ def main(argv: list[str] | None = None) -> int:
         config.control.auto_combos = True
     if args.game_over_mode:
         config.reward.game_over_mode = args.game_over_mode
+    apply_capture_flags(args, config)
     try:
         if args.check:
             return run_check(args, config)

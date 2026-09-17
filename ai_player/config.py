@@ -51,13 +51,28 @@ class Region:
 
 @dataclass
 class CaptureConfig:
-    """Where on the desktop the game lives."""
+    """Where on the desktop the game lives.
 
-    # Defaults describe a 800x600 window parked in the top-left corner. Run
-    # `python calibrate.py` on the game machine to overwrite these.
+    The static ``region`` is a fallback (and the initial guess written by
+    calibrate). At runtime ``follow_foreground`` (default) re-targets capture
+    at the live OS window so you can alt-tab between games without re-running
+    calibrate. ``window_title`` pins a substring/regex when you want the agent
+    to keep capturing a game even after you click away from it.
+    """
+
+    # Defaults describe a 800x600 window parked in the top-left corner. Used
+    # only until a live window is found (or when follow-foreground is off).
     region: Region = field(default_factory=lambda: Region(left=0, top=0, width=800, height=600))
     # mss monitor index used by calibrate.py for the full-desktop screenshot.
     monitor_index: int = 1
+    follow_foreground: bool = True
+    window_title: str = ""
+    # Extra title substrings to treat as non-games (merged with the built-in list).
+    exclude_titles: list[str] = field(default_factory=list)
+    min_width: int = 200
+    min_height: int = 150
+    # How often to re-query the OS for window geometry / foreground identity.
+    poll_interval: float = 0.25
 
 
 @dataclass
@@ -308,13 +323,26 @@ class HUDConfig:
     vlm_endpoint: str = "http://localhost:11434/api/generate"  # Ollama / OpenAI-compatible
     vlm_model: str = "qwen2.5-vl"
     vlm_timeout: float = 3.0
+    # Longest image side (px) sent to the VLM; larger frames are downscaled and
+    # any boxes the model returns are mapped back to full resolution.
+    vlm_max_image_dim: int = 640
     # Asynchronous VLM Sentinel & Cognitive Game Supervisor
     vlm_sentinel_interval: float = 2.0
-    auto_menu_nav: bool = True
-    guidance_enabled: bool = True
+    # A sentinel verdict older than this (seconds) is ignored for terminal
+    # decisions such as game-over short-circuits and menu navigation.
+    vlm_max_age: float = 6.0
+    # Minimum sentinel confidence for a game-over verdict to end the episode
+    # without waiting for ``reward.detection_patience``.
+    vlm_game_over_confidence: float = 0.75
+    # Menu navigation injects input on its own; opt in explicitly.
+    auto_menu_nav: bool = False
+    # Minimum seconds between automatic restart taps triggered by a menu verdict.
+    menu_nav_cooldown: float = 1.5
     # Semantic Cognitive Observation Space for RL
     cognitive_obs: bool = False
     cognitive_dim: int = 8
+    # ``lives`` from the VLM is normalised against this for the cognitive vector.
+    cognitive_max_lives: float = 5.0
 
 
 @dataclass

@@ -49,6 +49,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Override the agent decision rate (ignored by --mock, which runs unpaced)",
     )
     parser.add_argument("--countdown", type=int, default=0, help="Seconds to wait before starting")
+    parser.add_argument(
+        "--follow-foreground",
+        action="store_true",
+        default=None,
+        help="Follow the focused game window so you can alt-tab between titles",
+    )
+    parser.add_argument(
+        "--no-follow-foreground",
+        action="store_true",
+        help="Capture the saved desktop rectangle only",
+    )
+    parser.add_argument(
+        "--window-title",
+        default=None,
+        help="Only capture windows whose title contains this substring (or matches ^regex$)",
+    )
     return parser.parse_args(argv)
 
 
@@ -101,6 +117,12 @@ def resolve_config(args: argparse.Namespace) -> AppConfig:
         config.train.algo = args.algo
     if args.fps is not None:
         config.env.target_fps = args.fps
+    if args.follow_foreground:
+        config.capture.follow_foreground = True
+    if args.no_follow_foreground:
+        config.capture.follow_foreground = False
+    if args.window_title is not None:
+        config.capture.window_title = args.window_title
     return config
 
 
