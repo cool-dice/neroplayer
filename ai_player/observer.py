@@ -894,6 +894,18 @@ class GameObserver:
             self._game_over = build_game_over_detector(self._reward, supervisor=self._supervisor)
         return self._detected_hud
 
+    def forget_hud(self) -> None:
+        """Drop auto-detected HUD so the next game is scanned from scratch.
+
+        Called when capture retargets to a different OS window. A previous
+        game's template would poison the new title, so auto-detect clears it.
+        """
+        self._detected_hud = None
+        self._applied_hud_boxes.clear()
+        if self._hud_config is not None and self._hud_config.auto_detect:
+            self._reward.game_over_template = None
+        self.reset()
+
     def reset(self) -> None:
         self._streak = 0
         self._episode_points = 0.0

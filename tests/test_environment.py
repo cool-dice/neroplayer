@@ -8,7 +8,7 @@ import pytest
 from gymnasium.utils.env_checker import check_env
 
 from ai_player.cognitive import CognitiveState, CognitiveSupervisor
-from ai_player.config import AppConfig, HUDConfig
+from ai_player.config import AppConfig, HUDConfig, Region
 from ai_player.controls import NullController
 from ai_player.environment import GameEnv, make_env
 from ai_player.mock_game import build_mock_backends, mock_config
@@ -571,3 +571,64 @@ def test_env_does_not_stop_an_injected_supervisor_on_close():
         assert owned.is_running is False
     finally:
         sup.stop()
+
+
+class _SwitchingSource:
+    """Mock frame source that can announce a window identity change."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.current_title = "Celeste"
+        self.current_region = Region(0, 0, 320, 240)
+        self._switch = False
+
+    def grab(self):
+        return self._inner.grab()
+
+    def consume_switch(self) -> bool:
+        flag, self._switch = self._switch, False
+        return flag
+
+    def seed(self, seed: int | None) -> None:
+        seed_backend = getattr(self._inner, "seed", None)
+        if callable(seed_backend):
+            seed_backend(seed)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def test_env_truncates_and_rediscovers_hud_when_the_game_window_changes():
+    config = mock_config()
+    config.hud.auto_detect = True
+    _game, frames, audio, _ctrl = build_mock_backends(config, seed=31)
+    source = _SwitchingSource(frames)
+    env = GameEnv(
+        config,
+        frame_source=source,
+        audio_source=audio,
+        controller=NullController(config.control),
+    )
+    try:
+        env.reset()
+        env._observer._detected_hud = object()  # type: ignore[assignment]
+        env._probed_avatar = True
+
+        source.current_title = "Hollow Knight"
+        source.current_region = Region(12, 34, 640, 480)
+        source._switch = True
+        _obs, rew, term, trunc, info = env.step(0)
+        assert trunc is True
+        assert term is False
+        assert rew == 0.0
+        assert info["window_changed"] is True
+        assert info["window_title"] == "Hollow Knight"
+        assert env.config.capture.region == source.current_region
+        assert env._observer.detected_hud is None
+        assert env._probed_avatar is False
+
+        env.reset()
+        _obs, _rew, _term, trunc, info = env.step(0)
+        assert info.get("window_changed") is False
+    finally:
+        env.close()

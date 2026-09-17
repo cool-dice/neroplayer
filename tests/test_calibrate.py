@@ -10,6 +10,25 @@ import calibrate as calib_script
 from ai_player.config import AppConfig
 
 
+def test_calibrate_parse_args_follow_foreground_flags():
+    args = calib_script.parse_args(["--static-region", "--window-title", "Celeste"])
+    assert args.static_region is True
+    assert args.window_title == "Celeste"
+
+
+def test_calibrate_apply_capture_flags():
+    config = AppConfig()
+    args = calib_script.parse_args(["--static-region"])
+    calib_script.apply_capture_flags(args, config)
+    assert config.capture.follow_foreground is False
+
+    config = AppConfig()
+    args = calib_script.parse_args(["--window-title", "Celeste"])
+    calib_script.apply_capture_flags(args, config)
+    assert config.capture.follow_foreground is True
+    assert config.capture.window_title == "Celeste"
+
+
 def test_calibrate_parse_args_profile():
     args = calib_script.parse_args(["--profile"])
     assert args.profile is True
@@ -50,6 +69,7 @@ def test_calibrate_run_auto_hud(monkeypatch, capsys, tmp_path):
     config = AppConfig()
     dummy_frame = np.full((100, 100, 3), 128, dtype=np.uint8)
     monkeypatch.setattr(calib_script, "grab", lambda mon: dummy_frame)
+    monkeypatch.setattr(calib_script, "grab_game", lambda cfg: dummy_frame)
     monkeypatch.setattr(calib_script.time, "sleep", lambda s: None)
 
     out_file = tmp_path / "test_config.json"

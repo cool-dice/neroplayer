@@ -570,6 +570,19 @@ def test_game_observer_dynamic_hud_update_is_idempotent(reward, monkeypatch):
     assert observer.update_dynamic_hud({"score": [0, 0, 0, 0]}) is False
 
 
+def test_game_observer_forget_hud_clears_auto_detected_state(reward):
+    from ai_player.config import HUDConfig
+
+    observer = GameObserver(reward, hud_config=HUDConfig(auto_detect=True))
+    observer._detected_hud = object()  # type: ignore[assignment]
+    observer._applied_hud_boxes["score"] = [1, 2, 3, 4]
+    observer._reward.game_over_template = "stale.png"
+    observer.forget_hud()
+    assert observer.detected_hud is None
+    assert observer._applied_hud_boxes == {}
+    assert observer._reward.game_over_template is None
+
+
 def test_edge_keywords_follow_configured_game_over_keywords(reward):
     reward.game_over_keywords = ["YOU DIED"]
     detector = AutonomousGameOverDetector(reward)

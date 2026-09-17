@@ -51,13 +51,28 @@ class Region:
 
 @dataclass
 class CaptureConfig:
-    """Where on the desktop the game lives."""
+    """Where on the desktop the game lives.
 
-    # Defaults describe a 800x600 window parked in the top-left corner. Run
-    # `python calibrate.py` on the game machine to overwrite these.
+    The static ``region`` is a fallback (and the initial guess written by
+    calibrate). At runtime ``follow_foreground`` (default) re-targets capture
+    at the live OS window so you can alt-tab between games without re-running
+    calibrate. ``window_title`` pins a substring/regex when you want the agent
+    to keep capturing a game even after you click away from it.
+    """
+
+    # Defaults describe a 800x600 window parked in the top-left corner. Used
+    # only until a live window is found (or when follow-foreground is off).
     region: Region = field(default_factory=lambda: Region(left=0, top=0, width=800, height=600))
     # mss monitor index used by calibrate.py for the full-desktop screenshot.
     monitor_index: int = 1
+    follow_foreground: bool = True
+    window_title: str = ""
+    # Extra title substrings to treat as non-games (merged with the built-in list).
+    exclude_titles: list[str] = field(default_factory=list)
+    min_width: int = 200
+    min_height: int = 150
+    # How often to re-query the OS for window geometry / foreground identity.
+    poll_interval: float = 0.25
 
 
 @dataclass

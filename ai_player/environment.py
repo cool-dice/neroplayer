@@ -29,7 +29,7 @@ import numpy as np
 from gymnasium import spaces
 
 from .cognitive import CognitiveState, CognitiveSupervisor
-from .config import AppConfig
+from .config import AppConfig, Region
 from .controls import (
     ActionController,
     build_controller,
@@ -156,6 +156,7 @@ class GameEnv(gym.Env):
         self._episode_index = 0
         self._window_name = "ai-player"
         self._window_open = False
+        self._window_title = ""
 
     @property
     def supervisor(self) -> CognitiveSupervisor:
@@ -197,6 +198,7 @@ class GameEnv(gym.Env):
             time.sleep(env_cfg.reset_delay)
 
         frame = self._wait_for_playable_frame()
+        self._absorb_window_switch()
 
         # Autonomous HUD auto-configuration on first playable frame if enabled
         if self.config.hud.auto_detect and self._observer.detected_hud is None:
@@ -247,6 +249,7 @@ class GameEnv(gym.Env):
         self._last_frame = frame
         t2 = time.perf_counter()
         self._prof_grab.append((t2 - t1) * 1000.0)
+        window_changed = self._absorb_window_switch()
 
         # Feed frame to cognitive supervisor
         if self._supervisor is not None:
@@ -264,14 +267,16 @@ class GameEnv(gym.Env):
             self._last_applied_hud_layout = dict(cstate.hud_layout)
             self._observer.update_dynamic_hud(cstate.hud_layout)
 
-        if vlm_fresh and not verdict.terminated:
+        if vlm_fresh and not verdict.terminated and not window_changed:
             self._maybe_navigate_menu(cstate)
 
         self._episode_steps += 1
-        self._episode_reward += verdict.reward
-        truncated = self._episode_steps >= self.config.env.max_episode_steps
+        reward = 0.0 if window_changed else verdict.reward
+        terminated = False if window_changed else bool(verdict.terminated)
+        self._episode_reward += reward
+        truncated = window_changed or self._episode_steps >= self.config.env.max_episode_steps
 
-        if verdict.terminated or truncated:
+        if terminated or truncated:
             # Never leave a key held across an episode boundary; the game would
             # receive phantom input during the restart sequence.
             self._controller.release_all()
@@ -361,6 +366,8 @@ class GameEnv(gym.Env):
             "player_bbox": player_bbox_dict,
             "entities": tracked_entities,
             "collisions": collision_events,
+            "window_title": self._window_title,
+            "window_changed": window_changed,
             **cog_info,
         }
         # Benchmarking telemetry for HUD, diagnostics and logging
@@ -382,7 +389,7 @@ class GameEnv(gym.Env):
             tr1 = time.perf_counter()
             self._prof_render.append((tr1 - tr0) * 1000.0)
 
-        return obs, float(verdict.reward), bool(verdict.terminated), truncated, info
+        return obs, float(reward), terminated, truncated, info
 
     def _draw_hud(self, frame: np.ndarray) -> np.ndarray:
         """Overlay telemetry, action palette, and CNN vision inset for human preview."""
@@ -534,6 +541,9 @@ class GameEnv(gym.Env):
             f"EP #{self._episode_index} | STEP: {ep_step:4d} | "
             f"REW: {ep_rew:+6.1f} | PTS: {points:.0f} | {fps_text}"
         )
+        win = str(self._last_info.get("window_title") or self._window_title or "")
+        if win:
+            line1 = f"{line1} | WIN: {win[:32]}"
         cv2.putText(
             out,
             line1,
@@ -901,6 +911,38 @@ class GameEnv(gym.Env):
                 # trying to catch up with a burst of zero-length steps.
                 self._next_frame_at = time.perf_counter() + self._frame_period
         return self._frames.grab()
+
+    def _absorb_window_switch(self) -> bool:
+        """Apply a live capture retarget, if the frame source reported one.
+
+        Same-window moves only update ``capture.region``. A different OS window
+        is treated as a new game: HUD, avatar probe and the VLM verdict are
+        forgotten so the next ``reset()`` re-discovers them.
+        """
+        consume = getattr(self._frames, "consume_switch", None)
+        switched = bool(consume()) if callable(consume) else False
+        title = getattr(self._frames, "current_title", None)
+        if isinstance(title, str) and title:
+            self._window_title = title
+        region = getattr(self._frames, "current_region", None)
+        if isinstance(region, Region) and region.width > 0 and region.height > 0:
+            self.config.capture.region = region
+        if switched:
+            self._forget_current_game()
+        return switched
+
+    def _forget_current_game(self) -> None:
+        """Drop per-game vision state after the user alt-tabbed to a new title."""
+        forget = getattr(self._observer, "forget_hud", None)
+        if callable(forget):
+            forget()
+        else:
+            self._observer.reset()
+        self._supervisor.reset()
+        self._probed_avatar = False
+        self._probe.reset()
+        self._entity_tracker.reset()
+        self._last_applied_hud_layout = {}
 
     def _wait_for_playable_frame(self) -> np.ndarray:
         """Block until the game-over screen clears, or the timeout expires."""

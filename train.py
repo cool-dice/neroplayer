@@ -117,7 +117,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--countdown",
         type=int,
         default=0,
-        help="Seconds to wait before starting, so you can focus the game window",
+        help="Seconds to wait before starting (optional; follow-foreground locks onto the focused game)",
     )
     parser.add_argument(
         "--game-over-mode",
@@ -188,6 +188,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Disable semantic cognitive observation vector",
     )
+    parser.add_argument(
+        "--follow-foreground",
+        action="store_true",
+        default=None,
+        help="Follow the focused game window so you can alt-tab between titles (default on)",
+    )
+    parser.add_argument(
+        "--no-follow-foreground",
+        action="store_true",
+        help="Capture the saved desktop rectangle only; do not retarget on alt-tab",
+    )
+    parser.add_argument(
+        "--window-title",
+        default=None,
+        help="Only capture windows whose title contains this substring (or matches ^regex$)",
+    )
     args = parser.parse_args(argv)
     if args.timesteps is not None and args.timesteps <= 0:
         parser.error(f"--timesteps must be a positive integer, got {args.timesteps}")
@@ -246,6 +262,12 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.hud.cognitive_obs = True
     if args.no_cognitive_obs:
         config.hud.cognitive_obs = False
+    if args.follow_foreground:
+        config.capture.follow_foreground = True
+    if args.no_follow_foreground:
+        config.capture.follow_foreground = False
+    if args.window_title is not None:
+        config.capture.window_title = args.window_title
     return config
 
 

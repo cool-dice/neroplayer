@@ -59,6 +59,9 @@ def test_config_survives_a_json_round_trip(tmp_path):
     assert restored.hud.cognitive_obs is False
     assert restored.hud.cognitive_dim == 8
     assert restored.hud.cognitive_max_lives == 5.0
+    assert restored.capture.follow_foreground is True
+    assert restored.capture.window_title == ""
+    assert restored.capture.min_width == 200
 
 
 def test_vision_config_rgb_and_shapes():

@@ -197,6 +197,17 @@ def test_build_config_cognitive_obs_flags():
     assert cfg_no.hud.cognitive_obs is False
 
 
+def test_build_config_follow_foreground_and_window_title_flags():
+    args = train_script.parse_args(["--no-follow-foreground"])
+    cfg = train_script.build_config(args)
+    assert cfg.capture.follow_foreground is False
+
+    args = train_script.parse_args(["--follow-foreground", "--window-title", "Celeste"])
+    cfg = train_script.build_config(args)
+    assert cfg.capture.follow_foreground is True
+    assert cfg.capture.window_title == "Celeste"
+
+
 def test_build_config_infinite_flag_keeps_round_length():
     args = train_script.parse_args(["--infinite"])
     cfg = train_script.build_config(args)

@@ -120,17 +120,24 @@ plumbing clearly produces a learning signal the policy can exploit.
 
 ## Pointing it at a real game
 
-1. Open the game in a window and leave it visible.
-2. Calibrate:
+Capture follows the focused game window by default. You do **not** have to
+re-draw a rectangle when you alt-tab to another title: the agent retargets,
+forgets the previous game's HUD/avatar, and starts a fresh episode. Clicking
+the telemetry overlay or a terminal is ignored (sticky lock). Pin a title with
+`--window-title Celeste` if you want to look away without losing the game.
+
+1. Open a game and leave it visible (windowed, not exclusive fullscreen).
+2. Optional calibrate — this now writes a follow-foreground config, not a
+   one-off crop:
 
    ```bash
    python calibrate.py --output config.json
+   python calibrate.py --output config.json --window-title "Celeste"
+   python calibrate.py --output config.json --static-region   # old 3-box crop
    ```
 
-   You drag three boxes — the game window, the score digits, and the area where
-   the game-over screen appears — and then let a countdown capture a game-over
-   template while the game sits on that screen. Everything is written to
-   `config.json`.
+   Score and game-over boxes are optional: cancel them and autonomous HUD
+   detection fills them in at train time.
 
 3. Check what the agent sees. This needs no GUI, so it also works over remote
    sessions and when you edited `config.json` by hand:
@@ -190,10 +197,12 @@ plumbing clearly produces a learning signal the policy can exploit.
    and confirm in the console that rewards jump when you score and that
    episodes end when you die. Fix the regions before training for real.
 
-6. Train, giving yourself time to focus the game window:
+6. Train. Focus whichever game you want to play; switch titles whenever you
+   like — each switch ends the episode and re-detects HUD/avatar:
 
    ```bash
-   python train.py --config config.json --timesteps 500000 --countdown 5 --render
+   python train.py --config config.json --timesteps 500000 --render
+   python train.py --config config.json --window-title "Celeste" --infinite --render
    ```
 
    `--timesteps` must be positive. To train open-endedly, add `--infinite`:

@@ -19,6 +19,7 @@ bundled mock game).
 from __future__ import annotations
 
 import threading
+import time
 import warnings
 from typing import Protocol, runtime_checkable
 
@@ -26,6 +27,7 @@ import cv2
 import numpy as np
 
 from .config import AudioConfig, CaptureConfig, Region, VisionConfig
+from .window_target import WindowLocator, WindowTarget
 
 BGRFrame = np.ndarray  # (H, W, 3) uint8
 StackedFrames = np.ndarray  # (C, H, W) uint8
@@ -50,12 +52,67 @@ class ScreenCapture:
     ``mss`` handles are not thread-safe, so one instance belongs to one thread.
     The handle is created lazily on the first grab, which keeps the object
     importable and constructible on machines without a display.
+
+    When ``CaptureConfig.follow_foreground`` or ``window_title`` is set the
+    grab rectangle is refreshed from the live OS window. A change of window
+    *identity* (the OS handle) is exposed via :meth:`consume_switch` so the
+    environment can end the episode and re-detect HUD/avatar for the new game.
+    Geometry-only updates (the same window was moved or resized) stay silent.
     """
 
-    def __init__(self, capture: CaptureConfig) -> None:
+    def __init__(
+        self,
+        capture: CaptureConfig,
+        *,
+        locator: WindowLocator | None = None,
+    ) -> None:
         self._config = capture
         self._monitor = capture.region.as_mss_monitor()
         self._sct = None
+        self._locator = locator if locator is not None else WindowLocator()
+        self._target: WindowTarget | None = None
+        self._switched = False
+        self._last_poll = 0.0
+        self._title = ""
+
+    @property
+    def current_title(self) -> str:
+        return self._title
+
+    @property
+    def current_region(self) -> Region:
+        return Region(
+            left=int(self._monitor["left"]),
+            top=int(self._monitor["top"]),
+            width=int(self._monitor["width"]),
+            height=int(self._monitor["height"]),
+        )
+
+    def consume_switch(self) -> bool:
+        """Return-and-clear whether the captured window identity changed."""
+        switched, self._switched = self._switched, False
+        return switched
+
+    def poll_target(self, *, force: bool = False) -> None:
+        """Refresh the grab rectangle from the OS when follow/title tracking is on."""
+        cfg = self._config
+        if not cfg.follow_foreground and not (cfg.window_title or "").strip():
+            return
+        now = time.monotonic()
+        interval = max(0.0, cfg.poll_interval)
+        if not force and interval > 0.0 and (now - self._last_poll) < interval:
+            return
+        self._last_poll = now
+        found = self._locator.locate(cfg, previous=self._target)
+        if found is None:
+            return
+        previous = self._target
+        self._target = found
+        self._title = found.title
+        self._monitor = found.region.as_mss_monitor()
+        cfg.region = found.region
+        if previous is not None and previous.identity != found.identity:
+            self._switched = True
 
     def _ensure_handle(self) -> None:
         if self._sct is not None:
@@ -73,6 +130,7 @@ class ScreenCapture:
     def grab(self) -> BGRFrame:
         """Return the captured region as a contiguous BGR uint8 array."""
         self._ensure_handle()
+        self.poll_target()
         raw = self._sct.grab(self._monitor)  # BGRA
         frame = np.asarray(raw, dtype=np.uint8)
         return np.ascontiguousarray(frame[:, :, :3])

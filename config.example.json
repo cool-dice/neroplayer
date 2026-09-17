@@ -6,7 +6,13 @@
       "width": 800,
       "height": 600
     },
-    "monitor_index": 1
+    "monitor_index": 1,
+    "follow_foreground": true,
+    "window_title": "",
+    "exclude_titles": [],
+    "min_width": 200,
+    "min_height": 150,
+    "poll_interval": 0.25
   },
   "vision": {
     "width": 84,
